@@ -1,0 +1,8 @@
+code/model_cache/
+*.bin
+*.onnx
+*.pyc
+__pycache__/
+.DS_Store
+.idea/
+.vscode/
