@@ -1,0 +1,164 @@
+# def parse_papers_with_gpu(pdf_dir: str, output_dir: str, 
+                          chunk_size: int = 512, chunk_overlap: int = 50,
+                          use_token_split: bool = True,
+                          batch_size: int = 4,
+                          skip_existing: bool = True):
+    """
+    批量解析论文 PDF（GPU 加速版）
+    
+    Args:
+        pdf_dir: PDF 文件所在目录
+        output_dir: 输出目录
+        chunk_size: chunk 大小（token 或字符）
+        chunk_overlap: 重叠大小
+        use_token_split: True=按 token，False=按字符
+        batch_size: GPU 批处理大小（默认 4，可根据显存调整）
+        skip_existing: True=跳过已处理文件，False=重新处理
+    
+    Returns:
+        所有论文的解析结果列表
+    """
+    # ========== GPU 检测与配置 ==========
+    print("="*60)
+    print("🚀 GPU 检测与配置")
+    print("="*60)
+    
+    if torch.cuda.is_available():
+        device = 'cuda'
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        cuda_version = torch.version.cuda
+        print(f"✅ GPU 检测成功: {gpu_name}")
+        print(f"   显存: {gpu_memory:.2f} GB")
+        print(f"   CUDA 版本: {cuda_version}")
+        print(f"   建议批处理大小: {batch_size}")
+    else:
+        device = 'cpu'
+        print("⚠️  未检测到 GPU，将使用 CPU（速度较慢）")
+        batch_size = 1
+    
+    # ========== Marker 配置 ==========
+    print("\n📦 正在加载 Marker 模型...")
+    start_time = time.time()
+    
+    config = {
+        "output_format": "markdown",
+        "paginate_output": True,
+        "batch_size": batch_size,
+        "force_ocr": False,           # 不强制OCR（文本型PDF不需要）
+        "ocr_all_pages": False,       # 不对所有页面OCR
+        "languages": ["en"],          # 只检测英文（ACL论文都是英文，减少识别负担）
+        "table_output_format": "markdown",
+        "strip_existing_ocr": False,  # 保留PDF内嵌文本
+        "disable_image_extraction": True,  # 不提取图片，加速处理
+    }
+    
+    # 创建模型字典（Marker 内部会自动使用 GPU）
+    model_dict = create_model_dict()
+    
+    # 创建转换器
+    converter = PdfConverter(
+        config=ConfigParser(config).generate_config_dict(),
+        artifact_dict=model_dict,
+    )
+    
+    load_time = time.time() - start_time
+    print(f"✅ 模型加载完成，耗时: {load_time:.2f} 秒")
+    
+    # ========== 解析流程 ==========
+    os.makedirs(output_dir, exist_ok=True)
+    results = []
+    total_start_time = time.time()
+    
+    pdf_files = sorted(Path(pdf_dir).glob("*.pdf"))
+    print(f"\n📄 共 {len(pdf_files)} 个 PDF 待处理")
+    print(f"   输出目录: {output_dir}")
+    print(f"   分片方式: {'token' if use_token_split else 'char'}")
+    print(f"   Chunk Size: {chunk_size}")
+    print(f"   Chunk Overlap: {chunk_overlap}")
+    print(f"   跳过已处理: {skip_existing}")
+    print()
+    
+    success_count = 0
+    skip_count = 0
+    fail_count = 0
+    
+    for idx, pdf_path in enumerate(pdf_files, 1):
+        print(f"[{idx}/{len(pdf_files)}] 📄 处理: {pdf_path.name}")
+        
+        # 检查是否已处理
+        out_path = Path(output_dir) / f"{pdf_path.stem}.json"
+        if skip_existing and out_path.exists():
+            print(f"   ⏭️  已存在，跳过")
+            skip_count += 1
+            continue
+        
+        file_start_time = time.time()
+        
+        # 执行转换（GPU 加速）
+        try:
+            rendered = converter(str(pdf_path))
+            markdown_text = rendered.markdown
+            metadata = rendered.metadata
+            
+            # 提取页码映射
+            page_map = _extract_page_map(markdown_text)
+            
+            # 按 token 或字符分片
+            paper_id = pdf_path.stem
+            if use_token_split:
+                chunks = split_into_chunks_by_tokens(markdown_text, page_map, paper_id, 
+                                                      chunk_size, chunk_overlap)
+            else:
+                chunks = split_into_chunks(markdown_text, page_map, paper_id, 
+                                           chunk_size, chunk_overlap)
+            
+            # 构建结果
+            result = {
+                "paper_id": paper_id,
+                "title": metadata.get("title", paper_id),
+                "markdown": markdown_text,
+                "page_map": page_map,
+                "chunks": chunks,
+                "chunk_count": len(chunks),
+                "chunk_size_config": chunk_size,
+                "chunk_overlap_config": chunk_overlap,
+                "split_method": "token" if use_token_split else "char",
+                "source_file": pdf_path.name,
+                "device": device,
+                "processing_time": time.time() - file_start_time
+            }
+            
+            # 保存结果
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            
+            results.append(result)
+            success_count += 1
+            
+            # 打印统计信息
+            if use_token_split:
+                total_tokens = sum(c.get('token_count', 0) for c in chunks)
+                print(f"   ✅ 完成！Chunks: {len(chunks)}, Tokens: {total_tokens}, 耗时: {time.time() - file_start_time:.2f}秒")
+            else:
+                print(f"   ✅ 完成！Chunks: {len(chunks)}, 耗时: {time.time() - file_start_time:.2f}秒")
+            
+        except Exception as e:
+            print(f"   ❌ 处理失败: {e}")
+            fail_count += 1
+            continue
+    
+    # 总结
+    total_time = time.time() - total_start_time
+    print("\n" + "="*60)
+    print("🎉 处理完成！")
+    print("="*60)
+    print(f"   总耗时: {total_time:.2f} 秒")
+    print(f"   平均每篇: {total_time/success_count if success_count > 0 else 0:.2f} 秒")
+    print(f"   使用设备: {device}")
+    print(f"   处理成功: {success_count} 篇")
+    print(f"   跳过: {skip_count} 篇")
+    print(f"   失败: {fail_count} 篇")
+    print("="*60)
+    
+    return results
