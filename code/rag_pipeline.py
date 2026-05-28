@@ -1,21 +1,3 @@
-"""
-rag_pipeline.py - 阶段4：检索 + 重排 + 生成（全本地部署）
-
-完整 RAG 问答流程：
-1. 用户输入中文问题
-2. BGE-M3 生成查询向量（带前缀）
-3. ChromaDB 向量检索（top-k=10）
-4. BGE-Reranker 重排序（精排取 top-5）
-5. 构建 Prompt，调用本地 LLM 生成中文回答
-6. 输出答案 + 引用来源（论文名、页码、chunk_id）
-
-本地模型（8GB 显存适配）：
-- Embedding: BAAI/bge-m3 (fp16, ~2.2GB)
-- Reranker: BAAI/bge-reranker-v2-m3 (fp16, ~2.2GB)
-- LLM: Qwen/Qwen2.5-3B-Instruct (fp16, ~6GB)
-  模型按需加载，不会同时占用显存
-"""
-
 import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -30,6 +12,7 @@ import torch
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer, CrossEncoder
+from openai import OpenAI
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
@@ -67,7 +50,10 @@ COLLECTION_NAME = f"rag_papers_{CHUNK_SIZE}"
 RETRIEVE_TOP_K = 10
 RERANK_TOP_K = 5
 
-LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+LLM_MODEL = "deepseek-ai/DeepSeek-V4-Flash"  # 生成回答用的模型
+SCORING_MODEL = "Qwen/Qwen2.5-14B-Instruct"  # 评分用的模型（14B，评判能力更强）
+SILICONFLOW_API_KEY = "sk-sikigylnjewmvxoilaeihressilakdjxgmckrsqavluinily"  # 替换为您的硅基流动API Key
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 LLM_MAX_NEW_TOKENS = 1024
 LLM_TEMPERATURE = 0.3
 
@@ -78,8 +64,7 @@ class RAGModels:
     def __init__(self):
         self._embedder = None
         self._reranker = None
-        self._llm_tokenizer = None
-        self._llm_model = None
+        self._llm_client = None
 
     @property
     def embedder(self) -> SentenceTransformer:
@@ -108,6 +93,46 @@ class RAGModels:
                 model_kwargs={"torch_dtype": torch.float16} if device == "cuda" else {},
             )
         return self._reranker
+
+    @property
+    def llm_client(self) -> OpenAI:
+        """获取硅基流动API客户端"""
+        if self._llm_client is None:
+            self._llm_client = OpenAI(
+                api_key=SILICONFLOW_API_KEY,
+                base_url=SILICONFLOW_BASE_URL
+            )
+        return self._llm_client
+    
+    def generate_score(self, messages: list[dict]) -> str:
+        """使用硅基流动API生成评分（使用更便宜的模型）"""
+        response = self.llm_client.chat.completions.create(
+            model=SCORING_MODEL,  # 使用专用的评分模型
+            messages=messages,
+            max_tokens=50,  # 增加token数，确保输出完整（避免截断）
+            temperature=0.7,  # 评分任务
+            top_p=0.9,
+        )
+        return response.choices[0].message.content.strip()
+
+    def generate(self, messages: list[dict]) -> str:
+        """使用硅基流动API生成回答"""
+        response = self.llm_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            max_tokens=LLM_MAX_NEW_TOKENS,
+            temperature=LLM_TEMPERATURE,
+            top_p=0.9,
+        )
+        return response.choices[0].message.content.strip()
+
+    # ========== 以下为本地LLM代码（已注释，如需使用可取消注释） ==========
+    '''
+    def __init__(self):
+        self._embedder = None
+        self._reranker = None
+        self._llm_tokenizer = None
+        self._llm_model = None
 
     def load_llm(self):
         """加载 LLM 到 GPU"""
@@ -143,8 +168,36 @@ class RAGModels:
                 gc.collect()
             print("   🗑️  LLM 已卸载，显存已释放")
 
-    def generate(self, messages: list[dict]) -> str:
-        """使用 LLM 生成回答"""
+    def generate_score_local(self, messages: list[dict]) -> str:
+        """使用本地 LLM 生成评分"""
+        self.load_llm()
+        
+        text = self._llm_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        inputs = self._llm_tokenizer(text, return_tensors="pt")
+        if torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = self._llm_model.generate(
+                **inputs,
+                max_new_tokens=10,
+                temperature=0.7,
+                do_sample=True,
+                top_p=0.9,
+            )
+        
+        generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+        answer = self._llm_tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
+        return answer.strip()
+
+    def generate_local(self, messages: list[dict]) -> str:
+        """使用本地 LLM 生成回答"""
         self.load_llm()
         
         text = self._llm_tokenizer.apply_chat_template(
@@ -167,11 +220,11 @@ class RAGModels:
                 repetition_penalty=1.1,
             )
         
-        # 只解码新生成的部分
         generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
         answer = self._llm_tokenizer.decode(generated_ids, skip_special_tokens=True)
         
         return answer.strip()
+    '''
 
 
 # ========== 2. 向量检索 ==========
@@ -237,16 +290,21 @@ def build_prompt(query: str, context_docs: list[dict]) -> list[dict]:
         )
     
     context = "\n\n---\n\n".join(context_parts)
-    
     system_prompt = (
-        "你是一个学术论文问答助手。请根据提供的论文片段，用中文回答用户的问题。\n"
-        "要求：\n"
-        "1. 回答要准确、简洁，基于提供的上下文\n"
-        "2. 如果上下文不足以回答问题，请明确说明\n"
-        "3. 回答末尾必须列出引用来源，格式为：[论文名, 页码, chunk_id]\n"
-        "4. 如果问题与论文无关或无法从上下文中找到答案，请回答：'根据提供的论文内容，无法回答此问题。'"
+        "你是一个学术论文问答助手。请严格基于提供的论文片段回答用户问题。\n\n"
+        "【输出规则】（必须严格遵守）：\n\n"
+        "- 第1步：直接输出准确、简洁的中文回答正文\n"
+        "- 第2步：换行后，输出引用来源，格式：来自: [论文名, 第X页, chunk_id]\n"
+        "- 引用最多写2个，只写回答中用到的核心来源\n\n"
+        "【示例】：\n"
+        "该模型通过引入安全对齐机制提升了鲁棒性。\n"
+        "来自: [SafeRAG, 第2页, 2025.acl-long.230_SafeRAG_chunk_004]\n\n"
+        "【严重警告】：\n"
+        "- 若依据上下文不足以回答问题，仅输出：'根据已有信息，无法回答此问题。'（无需引用） "
+        "- 绝不能只输出引用而没有回答内容！\n"
+        "- 绝不能无法回答还输出引用！\n"
+        "- 违反上述规则将导致评测失败！"
     )
-    
     user_content = (
         f"以下是相关论文片段：\n\n{context}\n\n"
         f"用户问题：{query}\n\n"
@@ -294,8 +352,19 @@ def ask(question: str, models: RAGModels, chroma_collection) -> dict:
     answer = models.generate(messages)
     print(f"   生成耗时: {time.time()-t0:.2f}秒")
     
+    # ================= 新增：引用兜底补全逻辑 =================
+    # 检查回答中是否包含 "来自:" 或 "来自："
+    if "来自:" not in answer and "来自：" not in answer:
+        # 如果模型没写引用，且不是拒答，我们强制把排名 Top-1 的 chunk 作为引用拼接到末尾
+        if "无法回答此问题" not in answer and len(reranked) > 0:
+            top_doc = reranked[0]
+            forced_citation = f"\n\n来自: [{top_doc['title']}, 第{top_doc['page']}页, {top_doc['chunk_id']}]"
+            answer = answer + forced_citation
+            print("   ⚠️ 模型未生成引用，已自动补全 Top-1 引用。")
+    # =======================================================
+    
     sources = [
-        {"paper_id": doc["paper_id"], "title": doc["title"], "page": doc["page"], "chunk_id": doc["chunk_id"]}
+        {"paper_id": doc["paper_id"], "title": doc["title"], "page": doc["page"], "chunk_id": doc["chunk_id"], "text": doc["text"]}
         for doc in reranked
     ]
     
@@ -349,9 +418,6 @@ def main():
             print("📝 回答:")
             print(f"{'='*60}")
             print(result["answer"])
-            print(f"\n📚 引用来源:")
-            for i, src in enumerate(result["sources"], 1):
-                print(f"   [{i}] {src['title']} | 第{src['page']}页 | {src['chunk_id']}")
         except Exception as e:
             print(f"\n❌ 出错: {e}")
             import traceback
