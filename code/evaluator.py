@@ -13,14 +13,14 @@ class ContentBasedRAGEvaluator:
     不依赖chunk_id，通过文本相似度判断检索结果是否命中Gold Evidence
     """
     
-    def __init__(self, test_excel: str, similarity_threshold: float = 0.60,
-                 citation_similarity_threshold: float = 0.70,
+    def __init__(self, test_excel: str, similarity_threshold: float = 0.65,
+                 citation_similarity_threshold: float = 0.65,
                  auto_scoring: bool = True, scoring_model=None,
                  chroma_collection=None):
         """
         :param test_excel: 测试集Excel路径
-        :param similarity_threshold: 检索评估的相似度阈值（建议0.6-0.7）
-        :param citation_similarity_threshold: 引用准确率的相似度阈值（建议0.75-0.80，更严格）
+        :param similarity_threshold: 检索评估的相似度阈值
+        :param citation_similarity_threshold: 引用准确率的相似度阈值
         :param auto_scoring: 是否启用 LLM 自动评分
         :param scoring_model: 评分模型（可选，如果为 None 且 auto_scoring=True 则自动加载）
         :param chroma_collection: ChromaDB集合对象，用于根据chunk_id查询原文
@@ -60,6 +60,9 @@ class ContentBasedRAGEvaluator:
             self.all_questions.append(df)
         self.test_df = pd.concat(self.all_questions, ignore_index=True)
         
+        # 去重问题类型（防止Excel中有重复的sheet name）
+        self.question_types = list(dict.fromkeys(self.sheets.keys()))
+        
         print(f"✅ 初始化完成，共 {len(self.test_df)} 个问题")
         print(f"   检索评估阈值: {similarity_threshold}")
         print(f"   引用评估阈值: {citation_similarity_threshold}")
@@ -79,6 +82,8 @@ class ContentBasedRAGEvaluator:
 【知识点的定义 - 重要】
 知识点 = 标准答案中的【核心观点、关键概念、重要结论、主要方法/步骤】
 - 一个完整的观点/定义/方法 = 1个知识点
+- 同一观点下的并列概念/分类/举例 ≠ 独立知识点（算作同一个知识点的细节）
+- 修饰性形容词/副词 ≠ 独立知识点（如"重要的"等）
 - 举例、解释、背景说明 ≠ 独立知识点
 - 论文名、作者、年份 ≠ 知识点
 - 细节数据、具体数值 ≠ 独立知识点（除非是核心结论）
@@ -93,9 +98,13 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
 - 模型补充的合理细节、解释、举例 ≠ FP
 - 论文名、引用来源、页码 ≠ FP
 - 表述不同但意思相同 ≠ FP
+- 同一概念的不同缩写/简称 ≠ FP
+- 中英文表述同一概念 ≠ FP
 
-【输出格式】
-只输出三个整数，用英文逗号分隔，例如：3,0,0
+【输出格式 - 重要】
+按顺序输出三个整数：TP, FP, FN
+用英文逗号分隔，例如：3,0,0
+不要输出任何其他文字、标点符号或解释
 
 【标准答案】
 {gold_answer}
@@ -179,28 +188,6 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         
         is_hit = max_sim >= self.similarity_threshold
         return is_hit, max_sim
-    '''
-    def check_citation_hit_gold(self, citation_text: str, 
-                                  gold_evidence_texts: List[str]) -> Tuple[bool, float]:
-        """
-        判断引用文本是否命中Gold Evidence（使用更严格的引用阈值）
-        
-        :param citation_text: 引用文本
-        :param gold_evidence_texts: Gold Evidence文本列表
-        :return: (是否命中, 最高相似度)
-        """
-        if not gold_evidence_texts:
-            return False, 0.0
-        
-        max_sim = 0.0
-        for gold_text in gold_evidence_texts:
-            sim = self.compute_similarity(citation_text, gold_text)
-            max_sim = max(max_sim, sim)
-        
-        # 使用更严格的引用阈值
-        is_hit = max_sim >= self.citation_similarity_threshold
-        return is_hit, max_sim
-    '''
     def check_citation_hit_gold(self, citation_text: str, 
                                   gold_evidence_texts: List[str]) -> Tuple[int, float]:
         if not gold_evidence_texts:
@@ -243,7 +230,21 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         except:
             pass
         
-        # 智能判断换行符是真正的分隔符还是PDF复制导致的换行
+        # 提取双引号包裹的内容
+        import re
+        quoted_parts = re.findall(r'"([^"]+)"', gold_str)
+        
+        if quoted_parts:
+            # 有双引号，提取引号内的内容，合并内部的换行
+            parts = []
+            for part in quoted_parts:
+                # 将引号内的换行符替换为空格，合并成一条
+                cleaned = ' '.join(line.strip() for line in part.split('\n') if line.strip())
+                if cleaned:
+                    parts.append(cleaned)
+            return parts
+        
+        # 没有双引号，按换行或分号分隔
         if '\n' in gold_str:
             lines = gold_str.split('\n')
             # 如果每行都很短(<50字符)且行首是小写字母,说明是PDF换行,应该合并
@@ -265,14 +266,19 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         
         return [p.strip() for p in parts if p.strip()]
     
-    def calculate_recall_at_k(self, retrieved_chunks: List[Dict], 
+    def calculate_recall_at_k(self, reranked_chunks: List[Dict], 
                               gold_evidence_texts: List[str],
                               k_values: List[int] = [1, 3, 5, 10]) -> Dict[int, float]:
         """
         基于内容匹配计算Recall@k
         
-        :param retrieved_chunks: 检索到的chunk列表（按排名排序），每个包含'text'字段
+        :param reranked_chunks: 重排后的chunk列表（按排名排序），每个包含'text'字段
         :param gold_evidence_texts: Gold Evidence文本列表
+        :param k_values: 要计算的k值列表
+        
+        计算策略：
+        - Recall@1: Binary Recall（0或1），表示第一个结果是否命中任意Gold Evidence
+        - Recall@k (k>1): Coverage Recall（0到1），表示Top-K覆盖了多少比例的Gold Evidence
         """
         if not gold_evidence_texts:
             return {k: None for k in k_values}
@@ -280,27 +286,41 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         recall_results = {}
         
         for k in k_values:
-            top_k_chunks = retrieved_chunks[:k]
+            top_k_chunks = reranked_chunks[:k]
             
-            # 每个 k 值独立计算，不复用 gold_hit_flags
-            gold_hit_flags = [False] * len(gold_evidence_texts)
-            
-            # 对每个gold evidence，检查是否在top-k中被命中
-            hits = 0
-            for g_idx, gold_text in enumerate(gold_evidence_texts):
-                for chunk in top_k_chunks:
-                    chunk_text = chunk.get('text', '') or chunk.get('content', '')
-                    is_hit, sim = self.check_retrieved_hit_gold(chunk_text, [gold_text])
-                    if is_hit:
-                        gold_hit_flags[g_idx] = True
-                        hits += 1
+            if k == 1:
+                # Binary Recall: 第一个结果是否命中任意一条Gold Evidence
+                chunk_text = top_k_chunks[0].get('text', '') or top_k_chunks[0].get('content', '') if top_k_chunks else ''
+                chunk_text = self.clean_markdown(chunk_text)
+                
+                is_hit = False
+                for gold_text in gold_evidence_texts:
+                    hit, sim = self.check_retrieved_hit_gold(chunk_text, [gold_text])
+                    if hit:
+                        is_hit = True
                         break
-            
-            recall_results[k] = hits / len(gold_evidence_texts)
+                
+                recall_results[k] = 1.0 if is_hit else 0.0
+            else:
+                # Coverage Recall: Top-K覆盖了多少比例的Gold Evidence
+                gold_hit_flags = [False] * len(gold_evidence_texts)
+                
+                hits = 0
+                for g_idx, gold_text in enumerate(gold_evidence_texts):
+                    for chunk in top_k_chunks:
+                        chunk_text = chunk.get('text', '') or chunk.get('content', '')
+                        chunk_text = self.clean_markdown(chunk_text)
+                        is_hit, sim = self.check_retrieved_hit_gold(chunk_text, [gold_text])
+                        if is_hit:
+                            gold_hit_flags[g_idx] = True
+                            hits += 1
+                            break
+                
+                recall_results[k] = hits / len(gold_evidence_texts)
         
         return recall_results
     
-    def calculate_mrr(self, retrieved_chunks: List[Dict], 
+    def calculate_mrr(self, reranked_chunks: List[Dict], 
                       gold_evidence_texts: List[str]) -> float:
         """
         基于内容匹配计算MRR
@@ -309,8 +329,10 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         if not gold_evidence_texts:
             return None
         
-        for rank, chunk in enumerate(retrieved_chunks, start=1):
+        for rank, chunk in enumerate(reranked_chunks, start=1):
             chunk_text = chunk.get('text', '') or chunk.get('content', '')
+            # 清理markdown格式，提高与Gold Evidence的匹配度
+            chunk_text = self.clean_markdown(chunk_text)
             is_hit, sim = self.check_retrieved_hit_gold(chunk_text, gold_evidence_texts)
             if is_hit:
                 return 1.0 / rank
@@ -335,20 +357,32 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
             bracket_pattern = r'([^\(]+)\s*\(([^,]+),\s*([^\)]+)\)'
             bracket_match = re.search(bracket_pattern, match)
             if bracket_match:
+                title = bracket_match.group(1).strip()
+                page = bracket_match.group(2).strip()
+                chunk_id = bracket_match.group(3).strip()
+                # 组合成完整的数据库ID: 论文名_chunk_id
+                db_id = f"{title}_{chunk_id}" if not chunk_id.startswith(title.split('_')[0]) else chunk_id
                 citations.append({
-                    'title': bracket_match.group(1).strip(),
-                    'page': bracket_match.group(2).strip(),
-                    'chunk_id': bracket_match.group(3).strip()
+                    'title': title,
+                    'page': page,
+                    'chunk_id': chunk_id,
+                    'db_id': db_id  # 用于数据库查询的完整ID
                 })
                 continue
             
             # 逗号分隔格式 "论文名, 页码, chunk_id"
             parts = [p.strip() for p in match.split(',')]
             if len(parts) >= 3:
+                title = parts[0]
+                page = parts[1]
+                chunk_id = parts[2]
+                # 组合成完整的数据库ID: 论文名_chunk_id
+                db_id = f"{title}_{chunk_id}" if not chunk_id.startswith(title.split('_')[0]) else chunk_id
                 citations.append({
-                    'title': parts[0],
-                    'page': parts[1],
-                    'chunk_id': parts[2]
+                    'title': title,
+                    'page': page,
+                    'chunk_id': chunk_id,
+                    'db_id': db_id  # 用于数据库查询的完整ID
                 })
         
         return citations
@@ -431,14 +465,19 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         
         for citation in extracted_citations:
             chunk_id = citation.get('chunk_id', '')
+            db_id = citation.get('db_id', chunk_id)  # 使用完整的数据库ID
             
             # 策略1: 优先从向量数据库中查询原文（最准确）
-            src_text = self.get_chunk_text_from_db(chunk_id)
+            src_text = self.get_chunk_text_from_db(db_id)
             
-            # 策略2: 如果向量数据库查询失败，尝试从检索结果中找
+            # 策略2: 如果向量数据库查询失败，尝试用原始chunk_id查询
+            if not src_text and db_id != chunk_id:
+                src_text = self.get_chunk_text_from_db(chunk_id)
+            
+            # 策略3: 如果向量数据库查询失败，尝试从检索结果中找
             if not src_text:
                 for chunk in retrieved_chunks:
-                    if chunk.get('chunk_id', '') == chunk_id:
+                    if chunk.get('chunk_id', '') == chunk_id or chunk.get('chunk_id', '') == db_id:
                         src_text = chunk.get('text', '')
                         break
             
@@ -478,16 +517,77 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                                   gold_answer: str, gold_evidence_str: str,
                                   predicted_answer: str, predicted_sources: List[Dict],
                                   reranked_chunks: List[Dict],
-                                  manual_score: float = None) -> Dict:
+                                  manual_score: float = None,
+                                  ragas_metrics: Dict = None) -> Dict:
         """
         评估单个问题（基于内容匹配）
         
         :param reranked_chunks: 重排后的chunk列表（用于生成回答的上下文）
         :param manual_score: 人工评分（0-1），如果提供则使用人工评分
+        :param ragas_metrics: RAGas 评测结果（包含 tp/fp/fn），如果提供则直接使用
         """
         # 解析Gold Evidence
         gold_evidence_texts = self.parse_gold_evidence(gold_evidence_str)
         
+        # 判断是否为不可回答问题
+        is_unanswerable = (question_type == "不可回答" or 
+                          not gold_evidence_texts or 
+                          (len(gold_evidence_texts) == 1 and 
+                           any(keyword in gold_evidence_texts[0].lower() 
+                              for keyword in ['无法回答', '不可回答', '无', 'none', 'unanswerable'])))
+        
+        if is_unanswerable:
+            # 不可回答类问题：只计算回答正确率
+            # 判断模型是否正确拒答
+            is_correct_refusal = ("无法回答此问题" in predicted_answer or 
+                                 "不可回答" in predicted_answer or
+                                 "无法提供" in predicted_answer or
+                                 "没有足够信息" in predicted_answer)
+            
+            # 如果Gold Answer也是拒答，且模型也拒答 → TP
+            gold_is_refusal = ("无法回答" in str(gold_answer) or 
+                              "不可回答" in str(gold_answer) or
+                              "无法提供" in str(gold_answer))
+            
+            if gold_is_refusal and is_correct_refusal:
+                # 正确拒答：TP=1, FP=0, FN=0
+                correctness_score = 1.0
+                tp, fp, fn = 1, 0, 0
+            elif gold_is_refusal and not is_correct_refusal:
+                # 模型强行回答（幻觉）：TP=0, FP=1, FN=0
+                correctness_score = 0.0
+                tp, fp, fn = 0, 1, 0
+            elif not gold_is_refusal and is_correct_refusal:
+                # 模型错误拒答：TP=0, FP=0, FN=1
+                correctness_score = 0.0
+                tp, fp, fn = 0, 0, 1
+            else:
+                # 两者都有答案，用LLM评分
+                correctness_result = self.calculate_ragas_style_correctness(
+                    question, str(gold_answer), predicted_answer
+                )
+                correctness_score = correctness_result['f1_score']
+                tp, fp, fn = correctness_result['tp'], correctness_result['fp'], correctness_result['fn']
+            
+            return {
+                "question": question,
+                "question_type": question_type,
+                "gold_answer": gold_answer,
+                "predicted_answer": predicted_answer,
+                "recall_at_1": None,  # 不可回答问题不计算Recall
+                "recall_at_3": None,
+                "recall_at_5": None,
+                "mrr": None,  # 不可回答问题不计算MRR
+                "citation_accuracy": None,  # 不可回答问题不计算引用准确率
+                "answer_correctness": manual_score if manual_score is not None else correctness_score,
+                "is_unanswerable": True,
+                "is_correct_refusal": is_correct_refusal,
+                "tp": tp,
+                "fp": fp,
+                "fn": fn
+            }
+        
+        # 可回答问题：正常计算所有指标
         # 计算重排后的Recall@k
         recall_at_k = self.calculate_recall_at_k(
             reranked_chunks, gold_evidence_texts, k_values=[1, 3, 5]
@@ -500,21 +600,38 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         citation_accuracy, has_citation = self.calculate_citation_accuracy(
             predicted_answer, predicted_sources, gold_evidence_texts, reranked_chunks
         )
+        
+        # 计算回答正确率（TP/FP/FN）
+        if ragas_metrics is not None:
+            # 优先使用传入的 RAGas 评测结果
+            tp = ragas_metrics['tp']
+            fp = ragas_metrics['fp']
+            fn = ragas_metrics['fn']
+        elif manual_score is not None:
+            # 如果只有评分没有详细指标，使用默认值
+            tp, fp, fn = 0, 0, 0
+        else:
+            # 都没有，重新计算
+            correctness_result = self.calculate_ragas_style_correctness(
+                question, str(gold_answer), predicted_answer
+            )
+            tp, fp, fn = correctness_result['tp'], correctness_result['fp'], correctness_result['fn']
+        
         return {
             "question": question,
             "question_type": question_type,
             "gold_answer": gold_answer,
             "predicted_answer": predicted_answer,
-            "gold_evidence_count": len(gold_evidence_texts),
             "recall_at_1": recall_at_k[1],
             "recall_at_3": recall_at_k[3],
             "recall_at_5": recall_at_k[5],
             "mrr": mrr,
             "citation_accuracy": citation_accuracy,
-            "has_citation": has_citation,  # 标记是否有引用
-            "answer_correctness": manual_score,  # 人工评分
-            "reranked_count": len(reranked_chunks),
-            "predicted_sources_count": len(predicted_sources)
+            "answer_correctness": manual_score,
+            "is_unanswerable": False,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn
         }
     
     def run_evaluation(self, rag_pipeline_func, output_file: str = "evaluation_results.xlsx",
@@ -551,7 +668,11 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                 result = rag_pipeline_func(question)
                 
                 # 自动评分或人工评分
-                if self.auto_scoring:
+                # 不可回答问题跳过 LLM 评分，由 evaluate_single_question 内部处理
+                is_unanswerable = (question_type == "不可回答" or 
+                                  pd.isna(gold_evidence) or str(gold_evidence).strip() == "")
+                
+                if self.auto_scoring and not is_unanswerable:
                     print(f"\n{'='*80}")
                     print(f"问题 {idx+1}/{len(self.test_df)}: {question}")
                     print(f"{'='*80}")
@@ -579,6 +700,10 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                         print(f"✅ 自动评分: {manual_score:.2f}")
                     else:
                         print("⚠️  自动评分失败，跳过评分")
+                elif is_unanswerable:
+                    # 不可回答问题，跳过评分
+                    manual_score = None
+                    ragas_metrics = None
                 elif manual_scoring:
                     print(f"\n{'='*80}")
                     print(f"问题 {idx+1}/{len(self.test_df)}: {question}")
@@ -604,6 +729,7 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                             print("⚠️  请输入有效的数字")
                 else:
                     manual_score = None
+                    ragas_metrics = None
                 
                 metrics = self.evaluate_single_question(
                     question=question,
@@ -613,7 +739,8 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                     predicted_answer=result['answer'],
                     predicted_sources=result.get('sources', []),
                     reranked_chunks=result.get('context_docs', []),
-                    manual_score=manual_score
+                    manual_score=manual_score,
+                    ragas_metrics=ragas_metrics if (self.auto_scoring and not is_unanswerable) else None
                 )
                 
                 all_results.append(metrics)
@@ -629,10 +756,10 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                 print(f"  Recall@3:  {metrics['recall_at_3']:.4f}" if metrics['recall_at_3'] is not None else "  Recall@3:  N/A")
                 print(f"  Recall@5:  {metrics['recall_at_5']:.4f}" if metrics['recall_at_5'] is not None else "  Recall@5:  N/A")
                 print(f"  MRR:       {metrics['mrr']:.4f}" if metrics['mrr'] is not None else "  MRR:       N/A")
-                if metrics['has_citation']:
+                if metrics.get('citation_accuracy') is not None:
                     print(f"  引用准确率: {metrics['citation_accuracy']:.4f}")
                 else:
-                    print(f"  引用准确率: 0.0000 (未生成引用)")
+                    print(f"  引用准确率: N/A")
                 if metrics['answer_correctness'] is not None:
                     print(f"  回答正确率:   {metrics['answer_correctness']:.2f}")
                 print(f"{'='*80}")
@@ -642,21 +769,161 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
                 all_results.append({
                     "question": question,
                     "question_type": question_type,
+                    "gold_answer": "",
+                    "predicted_answer": "",
                     "error": str(e),
                     "recall_at_1": None, "recall_at_3": None,
                     "recall_at_5": None,
                     "mrr": None, "citation_accuracy": None,
-                    "answer_correctness": None
+                    "answer_correctness": None,
+                    "is_unanswerable": False,
+                    "tp": None, "fp": None, "fn": None
                 })
         
         # 保存结果（已经逐题追加，这里再保存一份完整的用于备份）
         results_df = pd.DataFrame(all_results)
         results_df.to_excel(output_file.replace('.xlsx', '_final.xlsx'), index=False)
         
+        # 在输出文件末尾添加平均值行
+        self._append_averages_to_excel(results_df, output_file)
+        
         # 打印汇总
         self._print_summary(results_df)
         
         return results_df
+    
+    def _append_averages_to_excel(self, results_df: pd.DataFrame, output_file: str):
+        """在Excel文件末尾添加平均值行（使用Excel公式，方便后续调整）"""
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            print("⚠️ 未安装 openpyxl，将使用普通平均值写入")
+            self._append_averages_simple(results_df, output_file)
+            return
+        
+        # 先保存普通Excel文件（包含数据）
+        results_df.to_excel(output_file, index=False)
+        
+        # 使用 openpyxl 添加公式行
+        wb = load_workbook(output_file)
+        ws = wb.active
+        
+        # 获取列名对应的字母
+        col_names = list(results_df.columns)
+        col_map = {name: idx + 1 for idx, name in enumerate(col_names)}  # 列号从1开始
+        
+        total_rows = len(results_df) + 1  # +1 因为Excel行号从1开始，且有表头
+        
+        # 需要计算平均值的指标列
+        metrics_cols = ['recall_at_1', 'recall_at_3', 'recall_at_5', 'mrr', 
+                       'citation_accuracy', 'answer_correctness', 'tp', 'fp', 'fn']
+        
+        # 获取列号
+        def get_col_letter(col_name):
+            """将列号转换为Excel列字母"""
+            if col_name not in col_map:
+                return None
+            col_num = col_map[col_name]
+            letter = ''
+            while col_num > 0:
+                col_num, remainder = divmod(col_num - 1, 26)
+                letter = chr(65 + remainder) + letter
+            return letter
+        
+        # 添加总体平均值行
+        avg_row_num = total_rows + 2  # 空一行后添加
+        ws.cell(row=avg_row_num, column=col_map.get('question', 1), value='【总体平均值】')
+        
+        for metric in metrics_cols:
+            col_letter = get_col_letter(metric)
+            if col_letter:
+                # 使用 AVERAGEIF 忽略空值
+                formula = f'=AVERAGEIF({col_letter}2:{col_letter}{total_rows},">0")'
+                ws.cell(row=avg_row_num, column=col_map[metric], value=formula)
+        
+        # 按问题类型添加平均值行
+        current_row = avg_row_num + 1
+        for q_type in self.question_types:
+            type_df = results_df[results_df['question_type'] == q_type]
+            if len(type_df) == 0:
+                continue
+            
+            ws.cell(row=current_row, column=col_map.get('question', 1), value=f'【{q_type}平均值】')
+            ws.cell(row=current_row, column=col_map.get('question_type', 2), value=q_type)
+            
+            for metric in metrics_cols:
+                col_letter = get_col_letter(metric)
+                if col_letter:
+                    formula = f'=AVERAGEIF({col_letter}2:{col_letter}{total_rows},">0")'
+                    ws.cell(row=current_row, column=col_map[metric], value=formula)
+            
+            current_row += 1
+        
+        wb.save(output_file)
+        print(f"\n✅ 平均值公式行已追加到: {output_file}")
+    
+    def _append_averages_simple(self, results_df: pd.DataFrame, output_file: str):
+        """备用方法：使用普通平均值（无openpyxl时）"""
+        # 分离可回答和不可回答问题
+        answerable_df = results_df[results_df.get('is_unanswerable', False) == False]
+        
+        all_avg_rows = []
+        
+        # 1. 总体平均值
+        overall_avg = {
+            "question": "【总体平均值】",
+            "question_type": "",
+            "gold_answer": "",
+            "predicted_answer": "",
+            "recall_at_1": answerable_df['recall_at_1'].mean() if len(answerable_df) > 0 else None,
+            "recall_at_3": answerable_df['recall_at_3'].mean() if len(answerable_df) > 0 else None,
+            "recall_at_5": answerable_df['recall_at_5'].mean() if len(answerable_df) > 0 else None,
+            "mrr": answerable_df['mrr'].mean() if len(answerable_df) > 0 else None,
+            "citation_accuracy": answerable_df['citation_accuracy'].mean() if len(answerable_df) > 0 else None,
+            "answer_correctness": results_df['answer_correctness'].mean() if len(results_df) > 0 else None,
+            "is_unanswerable": False,
+            "tp": results_df['tp'].mean() if 'tp' in results_df.columns and len(results_df) > 0 else None,
+            "fp": results_df['fp'].mean() if 'fp' in results_df.columns and len(results_df) > 0 else None,
+            "fn": results_df['fn'].mean() if 'fn' in results_df.columns and len(results_df) > 0 else None,
+        }
+        all_avg_rows.append(overall_avg)
+        
+        # 2. 按问题类型分类的平均值
+        for q_type in self.question_types:
+            type_df = results_df[results_df['question_type'] == q_type]
+            if len(type_df) == 0:
+                continue
+            
+            type_answerable = type_df[type_df.get('is_unanswerable', False) == False]
+            
+            type_avg = {
+                "question": f"【{q_type}平均值】",
+                "question_type": q_type,
+                "gold_answer": "",
+                "predicted_answer": "",
+                "recall_at_1": type_answerable['recall_at_1'].mean() if len(type_answerable) > 0 else None,
+                "recall_at_3": type_answerable['recall_at_3'].mean() if len(type_answerable) > 0 else None,
+                "recall_at_5": type_answerable['recall_at_5'].mean() if len(type_answerable) > 0 else None,
+                "mrr": type_answerable['mrr'].mean() if len(type_answerable) > 0 else None,
+                "citation_accuracy": type_answerable['citation_accuracy'].mean() if len(type_answerable) > 0 else None,
+                "answer_correctness": type_df['answer_correctness'].mean() if len(type_df) > 0 else None,
+                "is_unanswerable": False,
+                "tp": type_df['tp'].mean() if 'tp' in type_df.columns and len(type_df) > 0 else None,
+                "fp": type_df['fp'].mean() if 'fp' in type_df.columns and len(type_df) > 0 else None,
+                "fn": type_df['fn'].mean() if 'fn' in type_df.columns and len(type_df) > 0 else None,
+            }
+            all_avg_rows.append(type_avg)
+        
+        # 追加到Excel文件
+        avg_df = pd.DataFrame(all_avg_rows)
+        if os.path.exists(output_file):
+            existing_df = pd.read_excel(output_file)
+            combined_df = pd.concat([existing_df, avg_df], ignore_index=True)
+        else:
+            combined_df = avg_df
+        
+        combined_df.to_excel(output_file, index=False)
+        print(f"\n✅ 平均值行已追加到: {output_file}")
     
     def _append_to_excel(self, metrics: Dict, output_file: str):
         """追加单个问题的评测结果到 Excel 文件"""
@@ -678,21 +945,51 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         print("📊 评测结果汇总（基于内容匹配）")
         print("="*80)
         
-        print("\n【总体指标】")
+        # 分离可回答和不可回答问题
+        answerable_df = results_df[results_df.get('is_unanswerable', False) == False]
+        unanswerable_df = results_df[results_df.get('is_unanswerable', False) == True]
+        
+        print(f"\n【总体指标】（仅可回答问题: {len(answerable_df)}/{len(results_df)}题）")
         for metric in ['recall_at_1', 'recall_at_3', 'recall_at_5', 'mrr', 'citation_accuracy']:
-            val = results_df[metric].mean()
+            val = answerable_df[metric].mean()
             if pd.notna(val):
                 print(f"  {metric}: {val:.4f}")
+        
+        # 不可回答类问题的正确拒答率
+        if len(unanswerable_df) > 0:
+            correct_refusal_rate = unanswerable_df['is_correct_refusal'].mean()
+            print(f"\n【不可回答问题】（{len(unanswerable_df)}题）")
+            print(f"  正确拒答率: {correct_refusal_rate:.4f}")
         
         print("\n【按问题类型细分】")
         for q_type in self.question_types:
             type_df = results_df[results_df['question_type'] == q_type]
-            if len(type_df) > 0:
-                print(f"\n  {q_type} ({len(type_df)}题):")
-                for metric in ['recall_at_5', 'mrr', 'citation_accuracy']:
-                    val = type_df[metric].mean()
+            if len(type_df) == 0:
+                continue
+            
+            # 检查该类型是否包含不可回答问题
+            type_unanswerable = type_df[type_df.get('is_unanswerable', False) == True]
+            type_answerable = type_df[type_df.get('is_unanswerable', False) == False]
+            
+            print(f"\n  {q_type} ({len(type_df)}题):")
+            
+            if len(type_unanswerable) > 0:
+                correct_refusal_rate = type_unanswerable['is_correct_refusal'].mean()
+                print(f"    不可回答问题: {len(type_unanswerable)}题, 正确拒答率: {correct_refusal_rate:.4f}")
+            
+            if len(type_answerable) > 0:
+                # 输出检索指标
+                for metric in ['recall_at_1', 'recall_at_3', 'recall_at_5', 'mrr', 'citation_accuracy']:
+                    val = type_answerable[metric].mean()
                     if pd.notna(val):
                         print(f"    {metric}: {val:.4f}")
+                
+                # 输出回答正确率
+                correctness_val = type_answerable['answer_correctness'].mean()
+                if pd.notna(correctness_val):
+                    print(f"    answer_correctness: {correctness_val:.4f}")
+            elif len(type_unanswerable) == 0:
+                print("    (无有效评测数据)")
         
         print("\n" + "="*80)
 

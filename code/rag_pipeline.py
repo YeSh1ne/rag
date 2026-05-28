@@ -47,7 +47,7 @@ CHUNK_SIZE = "512"  # 与 build_vector_db.py 中使用的 chunk_size 一致
 VECTOR_DB_DIR = rf"E:\rag_project\code\vector_db\{MODEL_SHORT_NAME}\chunk_{CHUNK_SIZE}"
 COLLECTION_NAME = f"rag_papers_{CHUNK_SIZE}"
 
-RETRIEVE_TOP_K = 10
+RETRIEVE_TOP_K = 15
 RERANK_TOP_K = 5
 
 LLM_MODEL = "deepseek-ai/DeepSeek-V4-Flash"  # 生成回答用的模型
@@ -106,14 +106,22 @@ class RAGModels:
     
     def generate_score(self, messages: list[dict]) -> str:
         """使用硅基流动API生成评分（使用更便宜的模型）"""
-        response = self.llm_client.chat.completions.create(
-            model=SCORING_MODEL,  # 使用专用的评分模型
-            messages=messages,
-            max_tokens=50,  # 增加token数，确保输出完整（避免截断）
-            temperature=0.7,  # 评分任务
-            top_p=0.9,
-        )
-        return response.choices[0].message.content.strip()
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=SCORING_MODEL,  # 使用专用的评分模型
+                messages=messages,
+                max_tokens=50,  # 增加token数，确保输出完整（避免截断）
+                temperature=0.1,  # 评分任务
+                top_p=0.9,
+                timeout=30,  # 30秒超时
+            )
+            return response.choices[0].message.content.strip()
+        except KeyboardInterrupt:
+            print("\n⚠️ 评分请求被中断")
+            raise
+        except Exception as e:
+            print(f"\n⚠️ 评分请求失败: {e}")
+            raise
 
     def generate(self, messages: list[dict]) -> str:
         """使用硅基流动API生成回答"""
@@ -295,7 +303,8 @@ def build_prompt(query: str, context_docs: list[dict]) -> list[dict]:
         "【输出规则】（必须严格遵守）：\n\n"
         "- 第1步：直接输出准确、简洁的中文回答正文\n"
         "- 第2步：换行后，输出引用来源，格式：来自: [论文名, 第X页, chunk_id]\n"
-        "- 引用最多写2个，只写回答中用到的核心来源\n\n"
+        "- 引用最多写2个，只写回答中实际用到的核心来源\n"
+        "- 引用的论文名、页码、chunk_id 必须与上下文中的【完全一致】，不能编造\n\n"
         "【示例】：\n"
         "该模型通过引入安全对齐机制提升了鲁棒性。\n"
         "来自: [SafeRAG, 第2页, 2025.acl-long.230_SafeRAG_chunk_004]\n\n"
@@ -303,6 +312,7 @@ def build_prompt(query: str, context_docs: list[dict]) -> list[dict]:
         "- 若依据上下文不足以回答问题，仅输出：'根据已有信息，无法回答此问题。'（无需引用） "
         "- 绝不能只输出引用而没有回答内容！\n"
         "- 绝不能无法回答还输出引用！\n"
+        "- 绝不能编造不存在的论文名、页码或chunk_id！\n"
         "- 违反上述规则将导致评测失败！"
     )
     user_content = (
