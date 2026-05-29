@@ -67,7 +67,6 @@ class ContentBasedRAGEvaluator:
         
         print(f"✅ 初始化完成，共 {len(self.test_df)} 个问题")
         print(f"   检索评估阈值: {similarity_threshold}")
-        print(f"   引用评估阈值: {citation_similarity_threshold}")
         print(f"   自动评分: {'启用' if auto_scoring else '禁用'}")
     
     def evaluate_single_question(self, question: str, question_type: str,
@@ -135,7 +134,7 @@ class ContentBasedRAGEvaluator:
                 "recall_at_3": None,
                 "recall_at_5": None,
                 "mrr": None,  # 不可回答问题不计算MRR
-                "citation_accuracy": None,  # 不可回答问题不计算引用准确率
+                "citation_accuracy": None,
                 "answer_correctness": manual_score if manual_score is not None else correctness_score,
                 "is_unanswerable": True,
                 "is_correct_refusal": is_correct_refusal,
@@ -157,8 +156,8 @@ class ContentBasedRAGEvaluator:
             reranked_chunks, gold_evidence_texts
         )
         
-        # 计算引用准确率（基于重排后的结果）
-        citation_accuracy, has_citation = calculate_citation_accuracy(
+        # 计算引用准确率（引用 vs Gold Evidence 交集判断）
+        citation_accuracy, _ = calculate_citation_accuracy(
             self.sim_model, self.citation_similarity_threshold,
             self.chroma_collection,
             predicted_answer, predicted_sources, gold_evidence_texts, reranked_chunks

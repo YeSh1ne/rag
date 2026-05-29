@@ -1,6 +1,6 @@
 import re
 import pandas as pd
-from typing import Dict
+from typing import Dict, List
 from .utils import compute_similarity
 
 
@@ -93,3 +93,159 @@ FN（遗漏）：【标准答案中有】但模型回答完全没提到的知识
         "fp": fp,
         "fn": fn
     }
+
+
+def extract_claims(scoring_model, predicted_answer: str) -> List[str]:
+    """
+    Claim Extraction：将模型回答拆解为原子事实
+    
+    :param scoring_model: LLM 评分模型
+    :param predicted_answer: 模型生成的回答
+    :return: 原子事实列表
+    """
+    if not predicted_answer or predicted_answer.strip() == "":
+        return []
+    
+    # 快速判断：如果是拒答类回答，没有可拆解的事实
+    refusal_keywords = ["无法回答", "不可回答", "无法提供", "没有足够信息"]
+    if any(kw in predicted_answer for kw in refusal_keywords):
+        return []
+    
+    extraction_prompt = f"""请将以下回答拆解为独立的原子事实（Atomic Claims）。
+
+【规则 - 重要】
+- 每个事实应该是一个不可再分的、可独立验证的陈述
+- 每个事实必须是一个完整的陈述句，包含明确的主谓宾
+- 一个复杂句子中的多个独立主张需要拆成多条
+- 论文名、引用来源、页码、chunk_id 不算作事实
+- 修饰性描述（如"重要的"、"显著的"）不算独立事实
+- 举例、解释、补充说明不算独立事实
+- 问题背景复述不算新事实
+
+【拆解示例】
+回答："论文提出了方法A，该方法通过引入注意力机制，在三个基准测试上提升了10%的性能。"
+输出：
+1. 论文提出了方法A
+2. 方法A引入了注意力机制
+3. 方法A在三个基准测试上提升了10%的性能
+
+【回答】
+{predicted_answer}
+
+请按上面的格式输出，每条事实一行，用数字+英文句点开头（不要其他内容）：
+1. """
+
+    try:
+        messages = [
+            {"role": "system", "content": "你是一个严谨的文本分析助手。你只输出数字编号的列表，每条一行。"},
+            {"role": "user", "content": extraction_prompt}
+        ]
+        
+        raw_output = scoring_model.generate_score(messages)
+        
+        # 解析：匹配 "数字. 内容" 格式的行
+        claims = []
+        for line in raw_output.strip().split('\n'):
+            line = line.strip()
+            match = re.match(r'^\d+[\.\)、]\s*(.+)', line)
+            if match:
+                claim_text = match.group(1).strip().strip('"').strip("'")
+                if claim_text and len(claim_text) > 3:
+                    claims.append(claim_text)
+        
+        if claims:
+            return claims
+        
+        # 备用：按句号拆解
+        print(f"⚠️ Claim Extraction 编号解析失败，回退到按句号拆解...")
+        sentences = re.split(r'[。；;]', predicted_answer)
+        claims = [s.strip() for s in sentences if len(s.strip()) > 5]
+        return claims[:10]  # 最多10条
+        
+    except Exception as e:
+        print(f"⚠️ Claim Extraction 失败: {e}")
+        return []
+
+
+def verify_claims_grounding(scoring_model, claims: List[str], context_text: str) -> Dict[int, str]:
+    """
+    Grounding Verification：批量验证原子事实是否能从上下文中推导出来（NLI）
+    
+    :param scoring_model: LLM 评分模型
+    :param claims: 原子事实列表
+    :param context_text: 模型检索到的所有上下文（合并后的文本）
+    :return: {claim_index: verdict} 其中 verdict 为 "entailment" / "neutral" / "contradiction"
+    """
+    if not claims:
+        return {}
+    
+    # 限制上下文长度
+    max_context_chars = 8000
+    if len(context_text) > max_context_chars:
+        context_text = context_text[:max_context_chars] + "\n...(上下文已截断)"
+    
+    # 构造带编号的 claims 列表
+    claims_text = "\n".join([f"{i+1}. {claim}" for i, claim in enumerate(claims)])
+    
+    verification_prompt = f"""请逐个判断以下事实能否从提供的【上下文】中推导出来。
+
+【上下文】（模型检索到的所有文本）
+---
+{context_text}
+---
+
+【待验证的事实列表】
+{claims_text}
+
+【判定标准】
+- "entailment"：上下文明确支持该事实，或可以从上下文逻辑推导出来。
+- "neutral"：上下文不包含该事实的相关信息。
+- "contradiction"：上下文明确与该事实矛盾。
+
+【输出格式 - 重要】
+请按顺序输出每个事实的判定结果，每行一个（格式：编号:判定词），不要输出任何其他内容：
+1:entailment
+2:neutral
+3:entailment"""
+
+    try:
+        messages = [
+            {"role": "system", "content": "你是一个严谨的NLI评测助手。只输出'编号:判定词'格式的结果，每行一个。"},
+            {"role": "user", "content": verification_prompt}
+        ]
+        
+        raw_output = scoring_model.generate_score(messages)
+        
+        # 解析：匹配 "数字:verdict" 格式
+        verdict_map = {}
+        for line in raw_output.strip().split('\n'):
+            line = line.strip()
+            # 匹配格式: 1:entailment 或 1.entailment 或 1 entailment
+            match = re.match(r'^(\d+)\s*[:.\s]\s*(entailment|neutral|contradiction)', line, re.IGNORECASE)
+            if match:
+                idx = int(match.group(1)) - 1  # 转0-index
+                verdict = match.group(2).lower()
+                verdict_map[idx] = verdict
+            else:
+                # 备选匹配：行中包含数字和关键词
+                alt_match = re.search(r'(\d+).*?(entailment|neutral|contradiction)', line, re.IGNORECASE)
+                if alt_match:
+                    idx = int(alt_match.group(1)) - 1
+                    verdict = alt_match.group(2).lower()
+                    if idx not in verdict_map:
+                        verdict_map[idx] = verdict
+        
+        if verdict_map:
+            return verdict_map
+        
+        # 备用：在整个输出中搜索关键词按顺序匹配
+        all_verdicts = re.findall(r'(entailment|neutral|contradiction)', raw_output, re.IGNORECASE)
+        if len(all_verdicts) == len(claims):
+            return {i: v.lower() for i, v in enumerate(all_verdicts)}
+        
+        print(f"⚠️ Grounding Verification 解析失败: '{raw_output[:100]}...'")
+        return {}
+        
+    except Exception as e:
+        print(f"⚠️ Grounding Verification 失败: {e}")
+        return {}

@@ -12,15 +12,14 @@ def calculate_recall_at_k(sim_model, similarity_threshold: float,
     """
     基于内容匹配计算Recall@k
     
+    核心定义：若前 k 个检索结果中至少有一个 chunk 与任意一条 Gold Evidence 语义匹配，
+    则判定该问题检索成功（得分为 1），否则为 0。
+    
     :param sim_model: 语义相似度模型
     :param similarity_threshold: 检索评估的相似度阈值
     :param reranked_chunks: 重排后的chunk列表（按排名排序），每个包含'text'字段
     :param gold_evidence_texts: Gold Evidence文本列表
     :param k_values: 要计算的k值列表
-    
-    计算策略：
-    - Recall@1: Binary Recall（0或1），表示第一个结果是否命中任意Gold Evidence
-    - Recall@k (k>1): Coverage Recall（0到1），表示Top-K覆盖了多少比例的Gold Evidence
     """
     if not gold_evidence_texts:
         return {k: None for k in k_values}
@@ -30,35 +29,31 @@ def calculate_recall_at_k(sim_model, similarity_threshold: float,
     for k in k_values:
         top_k_chunks = reranked_chunks[:k]
         
-        if k == 1:
-            # Binary Recall: 第一个结果是否命中任意一条Gold Evidence
-            chunk_text = top_k_chunks[0].get('text', '') or top_k_chunks[0].get('content', '') if top_k_chunks else ''
+        is_any_hit = False
+        max_sim_overall = 0.0
+        hit_chunk_idx = -1
+        
+        for c_idx, chunk in enumerate(top_k_chunks):
+            chunk_text = chunk.get('text', '') or chunk.get('content', '')
             chunk_text = clean_markdown(chunk_text)
             
-            is_hit = False
             for gold_text in gold_evidence_texts:
-                hit, sim = check_retrieved_hit_gold(sim_model, similarity_threshold, chunk_text, [gold_text])
-                if hit:
-                    is_hit = True
+                is_hit, sim = check_retrieved_hit_gold(sim_model, similarity_threshold, chunk_text, [gold_text])
+                max_sim_overall = max(max_sim_overall, sim)
+                if is_hit:
+                    is_any_hit = True
+                    hit_chunk_idx = c_idx
                     break
-            
-            recall_results[k] = 1.0 if is_hit else 0.0
+            if is_any_hit:
+                break
+        
+        chunk_preview = top_k_chunks[hit_chunk_idx].get('text', '')[:50].replace('\n', ' ') if hit_chunk_idx >= 0 else ''
+        if is_any_hit:
+            print(f"    ✅ [Recall@{k}] Top-{k} 命中: chunk#{hit_chunk_idx+1} sim={max_sim_overall:.4f} | {chunk_preview}...")
         else:
-            # Coverage Recall: Top-K覆盖了多少比例的Gold Evidence
-            gold_hit_flags = [False] * len(gold_evidence_texts)
-            
-            hits = 0
-            for g_idx, gold_text in enumerate(gold_evidence_texts):
-                for chunk in top_k_chunks:
-                    chunk_text = chunk.get('text', '') or chunk.get('content', '')
-                    chunk_text = clean_markdown(chunk_text)
-                    is_hit, sim = check_retrieved_hit_gold(sim_model, similarity_threshold, chunk_text, [gold_text])
-                    if is_hit:
-                        gold_hit_flags[g_idx] = True
-                        hits += 1
-                        break
-            
-            recall_results[k] = hits / len(gold_evidence_texts)
+            print(f"    ❌ [Recall@{k}] Top-{k} 未命中: 最高sim={max_sim_overall:.4f} (阈值={similarity_threshold})")
+        
+        recall_results[k] = 1.0 if is_any_hit else 0.0
     
     return recall_results
 
@@ -89,69 +84,86 @@ def calculate_citation_accuracy(sim_model, citation_similarity_threshold: float,
                                 predicted_answer: str,
                                 predicted_sources: List[Dict],
                                 gold_evidence_texts: List[str],
-                                retrieved_chunks: List[Dict]) -> Tuple[float, bool]:
+                                retrieved_chunks: List[Dict]) -> Tuple[float, Dict]:
     """
-    计算引用准确率（F1 Score）
-    从向量数据库中根据chunk_id查询原文，然后与Gold Evidence进行语义匹配
+    计算引用准确率（Citation Accuracy）
+
+    核心定义：模型生成的引用（"来自:[...]"）是否命中了Gold Evidence。
+    与Faithfulness不同，此指标直接对比引用文本 vs Gold Evidence，不依赖LLM拆解。
+
+    计算逻辑（交集判断）：
+    1. 从回答中提取引用（chunk_id 等）
+    2. 通过向量数据库或检索结果获取引用原文
+    3. 对每个引用，判断其与任意 Gold Evidence 的语义相似度是否达标
+    4. TP = 命中Gold Evidence的引用数（去重，每个Gold只算一次）
+       FP = 未命中任何Gold Evidence的引用数
+       FN = 未被任何引用覆盖的Gold Evidence数
+    5. F1 = 2 * P * R / (P + R)
+
+    :param sim_model: 语义相似度模型
+    :param citation_similarity_threshold: 引用命中的相似度阈值
+    :param chroma_collection: ChromaDB集合，用于按chunk_id查原文
+    :param predicted_answer: 模型生成的回答
+    :param predicted_sources: 模型返回的sources列表
+    :param gold_evidence_texts: Gold Evidence文本列表（可包含N条）
+    :param retrieved_chunks: 检索到的chunk列表
+    :return: (f1_score, details_dict)
     """
+    # 提取引用
     extracted_citations = extract_citations_from_answer(predicted_answer)
-    
+
     if not extracted_citations:
-        return 0.0, False
-        
+        return 0.0, {"tp": 0, "fp": 0, "fn": len(gold_evidence_texts), "detail": "无引用"}
+
     if not gold_evidence_texts:
-        return 0.0, True 
-        
+        return 0.0, {"tp": 0, "fp": len(extracted_citations), "fn": 0, "detail": "无Gold Evidence"}
+
     tp, fp = 0, 0
-    matched_gold_indices = set() 
-    
+    matched_gold_indices = set()
+
     for citation in extracted_citations:
-        chunk_id = citation.get('chunk_id', '')
-        db_id = citation.get('db_id', chunk_id)  # 使用完整的数据库ID
-        
-        # 策略1: 优先从向量数据库中查询原文（最准确）
+        chunk_id = citation.get("chunk_id", "")
+        db_id = citation.get("db_id", chunk_id)
+
+        # 从向量数据库查询引用原文（已包含 clean_markdown）
         src_text = get_chunk_text_from_db(chroma_collection, db_id)
-        
-        # 策略2: 如果向量数据库查询失败，尝试用原始chunk_id查询
-        if not src_text and db_id != chunk_id:
-            src_text = get_chunk_text_from_db(chroma_collection, chunk_id)
-        
-        # 策略3: 如果向量数据库查询失败，尝试从检索结果中找
+
         if not src_text:
-            for chunk in retrieved_chunks:
-                if chunk.get('chunk_id', '') == chunk_id or chunk.get('chunk_id', '') == db_id:
-                    src_text = chunk.get('text', '')
-                    break
-        
-        # 策略4: 如果还没找到，尝试从 predicted_sources 中获取
-        if not src_text and predicted_sources:
-            for source in predicted_sources:
-                if source.get('chunk_id', '') == chunk_id:
-                    src_text = source.get('text', '')
-                    break
-        
-        # 与Gold Evidence进行匹配
-        if src_text:
-            hit_idx, sim = check_citation_hit_gold(
-                sim_model, citation_similarity_threshold, src_text, gold_evidence_texts
-            )
-            
-            if hit_idx != -1:
-                if hit_idx not in matched_gold_indices:
-                    tp += 1
-                    matched_gold_indices.add(hit_idx)
-                else:
-                    fp += 1  # 重复引用同一个 Gold
+            # 找不到原文，视为错误引用
+            fp += 1
+            continue
+
+        # 与 Gold Evidence 进行语义相似度判断
+        hit_idx, sim = check_citation_hit_gold(
+            sim_model, citation_similarity_threshold, src_text, gold_evidence_texts
+        )
+        src_preview = src_text[:50].replace('\n', ' ')
+        if hit_idx != -1:
+            if hit_idx not in matched_gold_indices:
+                tp += 1
+                matched_gold_indices.add(hit_idx)
+                print(f"    ✅ 引用[{chunk_id}] 命中Gold[{hit_idx+1}]: sim={sim:.4f} | {src_preview}...")
             else:
-                fp += 1      # 引用了无关内容
+                print(f"    ℹ️ 引用[{chunk_id}] 重复命中Gold[{hit_idx+1}]: sim={sim:.4f}（不计分）")
+            # 注意：引用命中已存在的Gold，不算FP（补充引用是合理的）
         else:
-            fp += 1  # 找不到原文，视为错误引用
+            fp += 1  # 未命中任何Gold Evidence
+            print(f"    ❌ 引用[{chunk_id}] 未命中任何Gold: 最高sim={sim:.4f} (阈值={citation_similarity_threshold}) | {src_preview}...")
 
-    fn = len(gold_evidence_texts) - len(matched_gold_indices) 
+    fn = len(gold_evidence_texts) - len(matched_gold_indices)
 
+    # 引用准确率只看 Precision：引用的内容是否都正确？
+    # 不惩罚未覆盖的Gold（Recall），因为很难要求模型引用所有内容
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
 
-    return round(f1_score, 4), True
+    details = {
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": round(precision, 4),
+        "recall": round(tp / (tp + fn) if (tp + fn) > 0 else 0.0, 4),
+        "total_citations": len(extracted_citations),
+        "total_gold": len(gold_evidence_texts),
+        "matched_gold": len(matched_gold_indices),
+        "detail": f"P={precision:.2f}"
+    }
+
+    return round(precision, 4), details

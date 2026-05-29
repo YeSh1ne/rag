@@ -110,7 +110,7 @@ class RAGModels:
             response = self.llm_client.chat.completions.create(
                 model=SCORING_MODEL,  # 使用专用的评分模型
                 messages=messages,
-                max_tokens=50,  # 增加token数，确保输出完整（避免截断）
+                max_tokens=200,  # Claim Extraction需要输出多条事实，增加到200
                 temperature=0.1,  # 评分任务
                 top_p=0.9,
                 timeout=30,  # 30秒超时
@@ -303,7 +303,7 @@ def build_prompt(query: str, context_docs: list[dict]) -> list[dict]:
         "【输出规则】（必须严格遵守）：\n\n"
         "- 第1步：直接输出准确、简洁的中文回答正文\n"
         "- 第2步：换行后，输出引用来源，格式：来自: [论文名, 第X页, chunk_id]\n"
-        "- 引用最多写2个，只写回答中实际用到的核心来源\n"
+        "- 引用最多写5个，“在引用证据时，请优先引用文档中的定义、摘要、结论或核心数据表格部分。如果多处提及同一事实，请引用论述最完整、最权威的那一处。”\n"
         "- 引用的论文名、页码、chunk_id 必须与上下文中的【完全一致】，不能编造\n\n"
         "【示例】：\n"
         "该模型通过引入安全对齐机制提升了鲁棒性。\n"
