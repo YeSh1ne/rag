@@ -16,8 +16,8 @@ class ContentBasedRAGEvaluator:
     不依赖chunk_id，通过文本相似度判断检索结果是否命中Gold Evidence
     """
     
-    def __init__(self, test_excel: str, similarity_threshold: float = 0.65,
-                 citation_similarity_threshold: float = 0.65,
+    def __init__(self, test_excel: str, similarity_threshold: float = 0.70,
+                 citation_similarity_threshold: float = 0.70,
                  auto_scoring: bool = True, scoring_model=None,
                  chroma_collection=None):
         """
@@ -86,44 +86,36 @@ class ContentBasedRAGEvaluator:
         gold_evidence_texts = parse_gold_evidence(gold_evidence_str)
         
         # 判断是否为不可回答问题
-        is_unanswerable = (question_type == "不可回答" or 
+        is_unanswerable = (question_type == "不可回答类" or 
                           not gold_evidence_texts or 
                           (len(gold_evidence_texts) == 1 and 
                            any(keyword in gold_evidence_texts[0].lower() 
-                              for keyword in ['无法回答', '不可回答', '无', 'none', 'unanswerable'])))
+                              for keyword in ['无法回答', '不可回答', 'unanswerable', 'not answerable'])))
+        
+        # 调试：输出不可回答问题的判断原因
+        if is_unanswerable:
+            reason = []
+            if question_type == "不可回答类":
+                reason.append(f"question_type='{question_type}'")
+            if not gold_evidence_texts:
+                reason.append("Gold Evidence解析为空")
+            if len(gold_evidence_texts) == 1 and any(keyword in gold_evidence_texts[0].lower() for keyword in ['无法回答', '不可回答', 'unanswerable', 'not answerable']):
+                reason.append(f"Gold包含拒答关键词: '{gold_evidence_texts[0][:50]}'")
+            print(f"  ⚠️ 判定为不可回答问题，原因: {'; '.join(reason)}")
         
         if is_unanswerable:
-            # 不可回答类问题：只计算回答正确率
-            # 判断模型是否正确拒答
-            is_correct_refusal = ("无法回答此问题" in predicted_answer or 
-                                 "不可回答" in predicted_answer or
-                                 "无法提供" in predicted_answer or
-                                 "没有足够信息" in predicted_answer)
+            # 不可回答类问题：评判标准是模型是否正确拒答
+            # 判断模型是否拒答（使用灵活的关键词匹配）
+            refusal_keywords = [
+                "无法回答", "不可回答", "无法提供", "没有足够信息",
+                "无法确定", "不能回答", "不足以回答", "无法给出",
+                "无法判断", "信息不足", "无法找到"
+            ]
+            is_correct_refusal = any(kw in predicted_answer for kw in refusal_keywords)
             
-            # 如果Gold Answer也是拒答，且模型也拒答 → TP
-            gold_is_refusal = ("无法回答" in str(gold_answer) or 
-                              "不可回答" in str(gold_answer) or
-                              "无法提供" in str(gold_answer))
-            
-            if gold_is_refusal and is_correct_refusal:
-                # 正确拒答：TP=1, FP=0, FN=0
-                correctness_score = 1.0
-                tp, fp, fn = 1, 0, 0
-            elif gold_is_refusal and not is_correct_refusal:
-                # 模型强行回答（幻觉）：TP=0, FP=1, FN=0
-                correctness_score = 0.0
-                tp, fp, fn = 0, 1, 0
-            elif not gold_is_refusal and is_correct_refusal:
-                # 模型错误拒答：TP=0, FP=0, FN=1
-                correctness_score = 0.0
-                tp, fp, fn = 0, 0, 1
-            else:
-                # 两者都有答案，用LLM评分
-                correctness_result = calculate_ragas_style_correctness(
-                    self.scoring_model, question, str(gold_answer), predicted_answer
-                )
-                correctness_score = correctness_result['f1_score']
-                tp, fp, fn = correctness_result['tp'], correctness_result['fp'], correctness_result['fn']
+            # 不可回答类问题：拒答=1分，强行回答=0分
+            correctness_score = 1.0 if is_correct_refusal else 0.0
+            tp, fp, fn = (1, 0, 0) if is_correct_refusal else (0, 1, 0)
             
             return {
                 "question": question,
@@ -231,7 +223,7 @@ class ContentBasedRAGEvaluator:
                 
                 # 自动评分或人工评分
                 # 不可回答问题跳过 LLM 评分，由 evaluate_single_question 内部处理
-                is_unanswerable = (question_type == "不可回答" or 
+                is_unanswerable = (question_type in ["不可回答", "不可回答类"] or 
                                   pd.isna(gold_evidence) or str(gold_evidence).strip() == "")
                 
                 if self.auto_scoring and not is_unanswerable:

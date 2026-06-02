@@ -21,6 +21,7 @@ def check_retrieved_hit_gold(sim_model: SentenceTransformer,
                               gold_evidence_texts: List[str]) -> Tuple[bool, float]:
     """
     判断一个检索到的chunk是否命中了任意一条Gold Evidence（使用检索阈值）
+    采用混合策略: 整段匹配 + 句子级匹配,取最大值,适应长短不一的Gold Evidence
     
     :param sim_model: 语义相似度模型
     :param similarity_threshold: 检索评估的相似度阈值
@@ -32,9 +33,20 @@ def check_retrieved_hit_gold(sim_model: SentenceTransformer,
         return False, 0.0
     
     max_sim = 0.0
+    
+    # 1. 整段匹配 (适合长Gold Evidence)
     for gold_text in gold_evidence_texts:
         sim = compute_similarity(sim_model, retrieved_chunk_text, gold_text)
         max_sim = max(max_sim, sim)
+    
+    # 2. 句子级匹配 (适合短Gold Evidence)
+    sentences = re.split(r'[.;!?\n]+', retrieved_chunk_text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]  # 过滤太短的句子
+    
+    for sentence in sentences:
+        for gold_text in gold_evidence_texts:
+            sim = compute_similarity(sim_model, sentence, gold_text)
+            max_sim = max(max_sim, sim)
     
     is_hit = max_sim >= similarity_threshold
     return is_hit, max_sim
@@ -56,11 +68,28 @@ def check_citation_hit_gold(sim_model: SentenceTransformer,
     if not gold_evidence_texts:
         return -1, 0.0
     
+    # 将citation_text按句子切分（用于句子级匹配）
+    # 英文句子切分：使用英文句号、分号、问号、感叹号和换行符
+    sentences = re.split(r'[.;!?\n]+', citation_text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 5]  # 过滤太短的句子
+    
     max_sim = 0.0
     best_match_idx = -1
     
     for idx, gold_text in enumerate(gold_evidence_texts):
-        sim = compute_similarity(sim_model, citation_text, gold_text)
+        # 1. 整chunk相似度（适合长Gold Evidence）
+        whole_sim = compute_similarity(sim_model, citation_text, gold_text)
+        
+        # 2. 句子级最大相似度（适合短Gold Evidence）
+        sentence_max_sim = 0.0
+        if sentences:
+            for sentence in sentences:
+                sent_sim = compute_similarity(sim_model, sentence, gold_text)
+                sentence_max_sim = max(sentence_max_sim, sent_sim)
+        
+        # 3. 取两者中的最大值
+        sim = max(whole_sim, sentence_max_sim)
+        
         if sim > max_sim:
             max_sim = sim
             best_match_idx = idx 
@@ -80,6 +109,7 @@ def parse_gold_evidence(gold_evidence_str: str) -> List[str]:
     - 单条文本: "Zhang et al. (2024) proposed..."
     - 多条文本（用换行或分号分隔）: "证据1\n证据2" 或 "证据1; 证据2"
     - JSON数组: '["证据1", "证据2"]'
+    - 双引号包裹的多条证据: "证据1"\n"证据2"
     """
     if pd.isna(gold_evidence_str) or str(gold_evidence_str).strip() == "":
         return []
@@ -94,20 +124,24 @@ def parse_gold_evidence(gold_evidence_str: str) -> List[str]:
     except:
         pass
     
-    # 提取双引号包裹的内容
-    quoted_parts = re.findall(r'"([^"]+)"', gold_str)
+    # 统一换行符格式：\r\n -> \n
+    gold_str = gold_str.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # 提取双引号包裹的内容（使用re.DOTALL支持跨行匹配）
+    quoted_parts = re.findall(r'"([^"]+)"', gold_str, re.DOTALL)
     
     if quoted_parts:
-        # 有双引号，提取引号内的内容，合并内部的换行
+        # 有双引号，每个引号内容作为一条独立证据
         parts = []
         for part in quoted_parts:
-            # 将引号内的换行符替换为空格，合并成一条
+            # 清理引号内的换行符，合并成一条
             cleaned = ' '.join(line.strip() for line in part.split('\n') if line.strip())
             if cleaned:
                 parts.append(cleaned)
-        return parts
+        if parts:
+            return parts
     
-    # 没有双引号，按换行或分号分隔
+    # 没有双引号或双引号解析失败，按换行或分号分隔
     if '\n' in gold_str:
         lines = gold_str.split('\n')
         # 如果每行都很短(<50字符)且行首是小写字母,说明是PDF换行,应该合并
@@ -132,8 +166,10 @@ def parse_gold_evidence(gold_evidence_str: str) -> List[str]:
 
 def clean_markdown(text: str) -> str:
     """
-    清理markdown格式，保留纯文本内容
+    清理Markdown格式和HTML标签，保留纯文本内容
     """
+    # 移除HTML标签（如<sup>, <sub>, <br>等）
+    text = re.sub(r'<[^>]+>', '', text)
     # 移除代码块
     text = re.sub(r'```[\s\S]*?```', '', text)
     # 移除行内代码
@@ -201,8 +237,8 @@ def extract_citations_from_answer(answer: str) -> List[dict]:
             title = parts[0]
             page = parts[1]
             chunk_id = parts[2]
-            # 组合成完整的数据库ID: 论文名_chunk_id
-            db_id = f"{title}_{chunk_id}" if not chunk_id.startswith(title.split('_')[0]) else chunk_id
+            # chunk_id已经是完整的数据库ID（如：2025.acl-long.230_SafeRAG_chunk_004）
+            db_id = chunk_id
             citations.append({
                 'title': title,
                 'page': page,

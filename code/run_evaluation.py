@@ -9,6 +9,8 @@ from evaluator import ContentBasedRAGEvaluator
 
 
 def main():
+    similarity_threshold = 0.67
+    citation_similarity_threshold = 0.67
     # 初始化模型
     models = RAGModels()
     
@@ -31,7 +33,8 @@ def main():
     # 初始化评测器
     evaluator = ContentBasedRAGEvaluator(
         test_excel="测试集.xlsx",
-        similarity_threshold=0.70,  # 可根据实际情况调整
+        similarity_threshold=similarity_threshold,  # 可根据实际情况调整
+        citation_similarity_threshold = citation_similarity_threshold,
         auto_scoring=True,  # 启用 LLM 自动评分
         chroma_collection=collection  # 传入向量数据库，用于引用验证
     )

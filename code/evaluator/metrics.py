@@ -137,18 +137,32 @@ def calculate_citation_accuracy(sim_model, citation_similarity_threshold: float,
         hit_idx, sim = check_citation_hit_gold(
             sim_model, citation_similarity_threshold, src_text, gold_evidence_texts
         )
+        # 生成预览：开头3-4个单词 + ... + 结尾3-4个单词
+        def make_preview(text, max_words=4):
+            words = text.replace('\n', ' ').split()
+            if len(words) <= max_words * 2:
+                return ' '.join(words)
+            return ' '.join(words[:max_words]) + ' ... ' + ' '.join(words[-max_words:])
+        
         src_preview = src_text[:50].replace('\n', ' ')
         if hit_idx != -1:
+            gold_preview = gold_evidence_texts[hit_idx][:50].replace('\n', ' ')
             if hit_idx not in matched_gold_indices:
                 tp += 1
                 matched_gold_indices.add(hit_idx)
-                print(f"    ✅ 引用[{chunk_id}] 命中Gold[{hit_idx+1}]: sim={sim:.4f} | {src_preview}...")
+                print(f"    ✅ 引用[{chunk_id}] 命中Gold[{hit_idx+1}]: sim={sim:.4f}")
+                print(f"       Chunk: {src_preview}")
+                print(f"       Gold:  {gold_preview}")
             else:
-                print(f"    ℹ️ 引用[{chunk_id}] 重复命中Gold[{hit_idx+1}]: sim={sim:.4f}（不计分）")
-            # 注意：引用命中已存在的Gold，不算FP（补充引用是合理的）
+                # 不同chunk命中同一Gold：不算冗余（答案可能分布在多个chunk中）
+                # 只有完全相同的chunk_id才算冗余
+                print(f"    ℹ️ 引用[{chunk_id}] 也命中Gold[{hit_idx+1}]: sim={sim:.4f}（不同chunk支持同一Gold，不计入TP/FP）")
+                print(f"       Chunk: {src_preview}")
+                print(f"       Gold:  {gold_preview}")
         else:
             fp += 1  # 未命中任何Gold Evidence
-            print(f"    ❌ 引用[{chunk_id}] 未命中任何Gold: 最高sim={sim:.4f} (阈值={citation_similarity_threshold}) | {src_preview}...")
+            print(f"    ❌ 引用[{chunk_id}] 未命中任何Gold: 最高sim={sim:.4f} (阈值={citation_similarity_threshold})")
+            print(f"       Chunk: {src_preview}")
 
     fn = len(gold_evidence_texts) - len(matched_gold_indices)
 

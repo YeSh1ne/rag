@@ -44,6 +44,9 @@ def append_averages_to_excel(results_df: pd.DataFrame, output_file: str, questio
     metrics_cols = ['recall_at_1', 'recall_at_3', 'recall_at_5', 'mrr', 
                    'citation_accuracy', 'answer_correctness', 'tp', 'fp', 'fn']
     
+    # 检索类指标（不应包含不可回答类问题）
+    retrieval_metrics = ['recall_at_1', 'recall_at_3', 'recall_at_5', 'mrr', 'citation_accuracy']
+    
     # 获取列号
     def get_col_letter(col_name):
         """将列号转换为Excel列字母"""
@@ -56,6 +59,10 @@ def append_averages_to_excel(results_df: pd.DataFrame, output_file: str, questio
             letter = chr(65 + remainder) + letter
         return letter
     
+    # 获取question_type列的字母（用于AVERAGEIF条件）
+    question_type_col = get_col_letter('question_type')
+    is_unanswerable_col = get_col_letter('is_unanswerable')
+    
     # 添加总体平均值行
     avg_row_num = total_rows + 2  # 空一行后添加
     ws.cell(row=avg_row_num, column=col_map.get('question', 1), value='【总体平均值】')
@@ -63,8 +70,13 @@ def append_averages_to_excel(results_df: pd.DataFrame, output_file: str, questio
     for metric in metrics_cols:
         col_letter = get_col_letter(metric)
         if col_letter:
-            # 使用 AVERAGEIF 忽略空值
-            formula = f'=AVERAGEIF({col_letter}2:{col_letter}{total_rows},">0")'
+            if metric in retrieval_metrics and is_unanswerable_col:
+                # 检索类指标：排除不可回答类问题（is_unanswerable=False的行）
+                # 使用AVERAGEIFS：排除is_unanswerable=TRUE的行
+                formula = f'=AVERAGEIFS({col_letter}2:{col_letter}{total_rows},{is_unanswerable_col}2:{is_unanswerable_col}{total_rows},FALSE)'
+            else:
+                # 其他指标（answer_correctness等）：计算所有行（AVERAGE自动忽略空值）
+                formula = f'=AVERAGE({col_letter}2:{col_letter}{total_rows})'
             ws.cell(row=avg_row_num, column=col_map[metric], value=formula)
     
     # 按问题类型添加平均值行
@@ -79,8 +91,13 @@ def append_averages_to_excel(results_df: pd.DataFrame, output_file: str, questio
         
         for metric in metrics_cols:
             col_letter = get_col_letter(metric)
-            if col_letter:
-                formula = f'=AVERAGEIF({col_letter}2:{col_letter}{total_rows},">0")'
+            if col_letter and question_type_col:
+                if metric in retrieval_metrics:
+                    # 检索类指标：只计算该类型且可回答的问题
+                    formula = f'=AVERAGEIFS({col_letter}2:{col_letter}{total_rows},{question_type_col}2:{question_type_col}{total_rows},"{q_type}",{is_unanswerable_col}2:{is_unanswerable_col}{total_rows},FALSE)'
+                else:
+                    # 其他指标：只计算该类型的所有问题
+                    formula = f'=AVERAGEIF({question_type_col}2:{question_type_col}{total_rows},"{q_type}",{col_letter}2:{col_letter}{total_rows})'
                 ws.cell(row=current_row, column=col_map[metric], value=formula)
         
         current_row += 1
@@ -168,6 +185,11 @@ def print_summary(results_df: pd.DataFrame, question_types: List[str]):
         val = answerable_df[metric].mean()
         if pd.notna(val):
             print(f"  {metric}: {val:.4f}")
+    
+    # 总体回复正确率（基于所有问题，包括可回答和不可回答）
+    correctness_val = results_df['answer_correctness'].mean()
+    if pd.notna(correctness_val):
+        print(f"  answer_correctness: {correctness_val:.4f}（所有{len(results_df)}题）")
     
     # 不可回答类问题的正确拒答率
     if len(unanswerable_df) > 0:
