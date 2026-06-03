@@ -43,13 +43,13 @@ BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 # 向量数据库路径：与 build_vector_db.py 保持一致
 MODEL_SHORT_NAME = EMBEDDING_MODEL.split("/")[-1].lower().replace("_", "-")
-CHUNK_SIZE = "512"  # 与 build_vector_db.py 中使用的 chunk_size 一致
+CHUNK_SIZE = "256"  # 与 build_vector_db.py 中使用的 chunk_size 一致
 VECTOR_DB_DIR = rf"E:\rag_project\code\vector_db\{MODEL_SHORT_NAME}\chunk_{CHUNK_SIZE}"
 COLLECTION_NAME = f"rag_papers_{CHUNK_SIZE}"
 
 RETRIEVE_TOP_K = 20
-RERANK_TOP_K = 5
-MMR_LAMBDA = 0.5  # MMR多样性权重, 1.0=纯相关性, 0.0=纯多样性 (0.5=平衡)
+RERANK_TOP_K = 10
+MMR_LAMBDA = 0.55  # MMR多样性权重, 1.0=纯相关性, 0.0=纯多样性 (0.5=平衡)
 
 LLM_MODEL = "deepseek-ai/DeepSeek-V4-Pro"  # 生成回答用的模型
 SCORING_MODEL = "Qwen/Qwen2.5-32B-Instruct"  # 评分用的模型（14B，评判能力更强）

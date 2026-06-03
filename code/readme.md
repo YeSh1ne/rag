@@ -8,35 +8,39 @@
 
 ## 技术选型
 
-| 阶段         | 组件          | 技术选型                                |
-| ---------- | ----------- | ----------------------------------- |
-| 1. 文档加载与解析 | PDF提取       | Marker                              |
-| 2. 文本分块    | 文本分块        | tiktoken                            |
-| 3. 向量化     | Embedding模型 | BGE-M3 / Qwen3-Embedding            |
-|            | 批量处理        | SentenceTransformer.encode()        |
-| 4. 向量存储    | 向量数据库       | ChromaDB / Qdrant                   |
-|            | 索引类型        | HNSW                                |
-| 5. 检索      | 向量检索        | ChromaDB.similarity\_search()       |
-|            | 检索框架        | LlamaIndex Retriever                |
-| 6. 重排序     | 重排序模型       | BGE-Reranker-v2-m3                  |
-|            | 重排序策略       | Cross-Encoder                       |
-| 7. 提示构建    | Prompt模板    | LangChain PromptTemplate            |
-|            | 上下文压缩       | ContextualCompressionRetriever      |
-| 8. 生成      | 硅基流动LLM     | deepseek-ai/DeepSeek-V4-Flash       |
-| 9.评测指标     | 回答正确率       | Qwen/Qwen2.5-7B-Instruct as a Judge |
-|            | recall, mrr | 语义相似度                               |
-|            | 引用准确率       | F1score                             |
+| 阶段         | 组件          | 技术选型                                 |
+| ---------- | ----------- | ------------------------------------ |
+| 1. 文档加载与解析 | PDF提取       | Marker                               |
+| 2. 文本分块    | 文本分块        | tiktoken                             |
+| 3. 向量化     | Embedding模型 | BGE-M3 / Qwen3-Embedding             |
+|            | 批量处理        | SentenceTransformer.encode()         |
+| 4. 向量存储    | 向量数据库       | ChromaDB / Qdrant                    |
+|            | 索引类型        | HNSW                                 |
+| 5. 检索      | 向量检索        | ChromaDB.similarity\_search()        |
+|            | 检索框架        | LlamaIndex Retriever                 |
+| 6. 重排序     | 重排序模型       | BGE-Reranker-v2-m3                   |
+|            | 重排序策略       | Cross-Encoder 结合 MMR多样性重排序           |
+| 7. 生成      | 硅基流动LLM     | deepseek-ai/DeepSeek-V4-Pro          |
+| 8. 评测指标    | 回答正确率       | Qwen/Qwen2.5-32B-Instruct as a Judge |
+|            | recall, mrr | 语义相似度                                |
+|            | 引用准确率       | 语义相似度                                |
 
-## 实验变量
+## 对比实验
 
 对比测试 chunk\_size、top-k 检索数、embedding模型, LLM四类参数，完成多组消融实验
 
-| chunk\_size | top-k | embedding模型 |        LLM       | Recall@1 (Binary) | Recall@3(Coverage) | Recall@5(Coverage) |  MRR | 引用准确率 | 回答正确率 |
-| :---------: | :---: | :---------: | :--------------: | :---------------: | :----------------: | :----------------: | :--: | :---: | :---: |
-|     512     |   5   |    BGE-M3   | deepseekV4-flash |        0.61       |        0.68        |        0.70        | 0.69 |  0.57 |  0.81 |
-|     512     |   5   |    BGE-M3   |  deepseekV4-Pro  |        0.64       |        0.74        |        0.81        | 0.70 |  0.81 |  0.80 |
-|             |       |             |                  |                   |                    |                    |      |       |       |
-|             |       |             |                  |                   |                    |                    |      |       |       |
+相似度阈值: recall:0.72, cite: 0.70(X), recall:0.75, cite:0.75(Y)
+
+| chunk\_size | top-k | embedding模型 |       LLM      | Recall@1 | Recall@3 | Recall@5 |  MRR  | 引用准确率 | 回答正确率 |
+| :---------: | :---: | :---------: | :------------: | :------: | :------: | :------: | :---: | :---: | :---: |
+|    512-1X   |   5   |    BGE-M3   | deepseekV4-Pro |   0.929  |   0.952  |   0.952  | 0.937 | 0.917 | 0.936 |
+|    512-1X   |   7   |    BGE-M3   | deepseekV4-Pro |   0.929  |   0.952  |   0.952  | 0.937 | 0.933 | 0.913 |
+|    512-1X   |   10  |    BGE-M3   | deepseekV4-Pro |   0.929  |   0.952  |   0.952  | 0.937 | 0.923 | 0.921 |
+|    512-1Y   |   5   |    BGE-M3   | deepseekV4-Pro |   0.881  |   0.952  |   0.952  | 0.909 | 0.869 | 0.924 |
+|    512-1Y   |   10  |    BGE-M3   | deepseekV4-Pro |   0.929  |   0.952  |   0.952  | 0.937 | 0.862 | 0.875 |
+|    256-1Y   |   5   |    BGE-M3   | deepseekV4-Pro |   0.786  |   0.929  |   0.976  | 0.857 | 0.885 | 0.910 |
+|    256-Y    |   10  |    BGE-M3   | deepseekV4-Pro |   0.810  |   0.952  |   0.976  | 0.875 | 0.792 | 0.915 |
+|             |       |             |                |          |          |          |       |       |       |
 
 ## 评测指标
 

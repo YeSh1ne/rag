@@ -9,17 +9,17 @@ from evaluator import ContentBasedRAGEvaluator
 
 
 def main():
-    similarity_threshold = 0.67
-    citation_similarity_threshold = 0.67
+    similarity_threshold = 0.75
+    citation_similarity_threshold = 0.75
     # 初始化模型
     models = RAGModels()
     
     # 初始化向量数据库
     chroma_client = chromadb.PersistentClient(
-        path="E:\\rag_project\\code\\vector_db\\bge-m3\\chunk_512",
+        path="E:\\rag_project\\code\\vector_db\\bge-m3\\chunk_256",
         settings=Settings(anonymized_telemetry=False),
     )
-    collection = chroma_client.get_collection("rag_papers_512")
+    collection = chroma_client.get_collection("rag_papers_256")
     
     # RAG pipeline 包装函数
     def rag_pipeline_wrapper(question: str) -> dict:

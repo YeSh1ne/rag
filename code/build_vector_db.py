@@ -24,7 +24,9 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 CHUNK_DIRS = {
+    "256": r"E:\rag_project\code\parsed_output_256",
     "512": r"E:\rag_project\code\parsed_output_512",
+    "1024": r"E:\rag_project\code\parsed_output_1024",
 }
 EMBEDDING_MODEL = "BAAI/bge-m3"
 MODEL_SHORT_NAME = EMBEDDING_MODEL.split("/")[-1].lower().replace("_", "-")
