@@ -2,7 +2,7 @@
 RAG 评测运行脚本
 """
 
-from rag_pipeline import ask, RAGModels
+from rag_pipeline import ask, RAGModels, EMBEDDING_MODEL, CHUNK_SIZE, VECTOR_DB_DIR, COLLECTION_NAME
 import chromadb
 from chromadb.config import Settings
 from evaluator import ContentBasedRAGEvaluator
@@ -11,15 +11,24 @@ from evaluator import ContentBasedRAGEvaluator
 def main():
     similarity_threshold = 0.75
     citation_similarity_threshold = 0.75
+    
+    # 打印当前配置
+    print(f"📋 当前配置:")
+    print(f"   Embedding 模型: {EMBEDDING_MODEL}")
+    print(f"   Chunk Size: {CHUNK_SIZE}")
+    print(f"   向量数据库: {VECTOR_DB_DIR}")
+    print(f"   Collection: {COLLECTION_NAME}")
+    print()
+    
     # 初始化模型
     models = RAGModels()
     
-    # 初始化向量数据库
+    # 初始化向量数据库（自动根据配置生成路径）
     chroma_client = chromadb.PersistentClient(
-        path="E:\\rag_project\\code\\vector_db\\bge-m3\\chunk_256",
+        path=VECTOR_DB_DIR,
         settings=Settings(anonymized_telemetry=False),
     )
-    collection = chroma_client.get_collection("rag_papers_256")
+    collection = chroma_client.get_collection(COLLECTION_NAME)
     
     # RAG pipeline 包装函数
     def rag_pipeline_wrapper(question: str) -> dict:

@@ -22,13 +22,17 @@ import torch
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
+from embedding_utils import APIEmbedder
 
 CHUNK_DIRS = {
     "256": r"E:\rag_project\code\parsed_output_256",
     "512": r"E:\rag_project\code\parsed_output_512",
-    "1024": r"E:\rag_project\code\parsed_output_1024",
+    #"1024": r"E:\rag_project\code\parsed_output_1024",
 }
-EMBEDDING_MODEL = "BAAI/bge-m3"
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # 本地: BAAI/bge-m3 | API: Qwen/Qwen3-Embedding-8B
+USE_API_EMBEDDING = True  # True=使用硅基流动API, False=使用本地模型
+SILICONFLOW_API_KEY = "sk-sikigylnjewmvxoilaeihressilakdjxgmckrsqavluinily"  # 替换为您的硅基流动API Key
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 MODEL_SHORT_NAME = EMBEDDING_MODEL.split("/")[-1].lower().replace("_", "-")
 BATCH_SIZE = 16
 SKIP_EXISTING = True
@@ -202,7 +206,7 @@ def build_collection(chunk_size: str, json_dir: str, model: SentenceTransformer)
 
 def main():
     print("=" * 60)
-    print("🚀 阶段3：BGE-M3 Embedding + ChromaDB 向量存储")
+    print("🚀 阶段3：Embedding + ChromaDB 向量存储")
     print("=" * 60)
     
     if torch.cuda.is_available():
@@ -213,34 +217,49 @@ def main():
         device = "cpu"
         print("⚠️  CPU 模式（速度较慢）")
     
-    MODEL_PATH = EMBEDDING_MODEL
-    try:
-        from modelscope import snapshot_download
-        modelscope_id = "BAAI/bge-m3"
-        print(f"📥 正在通过 ModelScope 下载模型: {modelscope_id}...")
-        MODEL_PATH = snapshot_download(modelscope_id, cache_dir="./model_cache")
-        print(f"✅ ModelScope 下载完成，缓存至: {MODEL_PATH}")
-    except ImportError:
-        print("⚠️ 未安装 modelscope，将使用 HuggingFace 源")
-    except Exception as e:
-        print(f"⚠️ ModelScope 下载失败: {e}")
-        print(f"   回退到 HuggingFace 源: {EMBEDDING_MODEL}")
-        MODEL_PATH = EMBEDDING_MODEL
-
-    print(f"\n📦 加载 Embedding 模型: {MODEL_PATH} (fp16)")
+    print(f"\n📦 加载 Embedding 模型: {EMBEDDING_MODEL}")
     t0 = time.time()
-    model = SentenceTransformer(
-        MODEL_PATH,
-        device=device,
-        trust_remote_code=True,
-        model_kwargs={"torch_dtype": torch.float16},
-    )
-    print(f"✅ 模型加载完成，耗时: {time.time() - t0:.2f} 秒")
-    print(f"   向量维度: {model.get_sentence_embedding_dimension()}")
-    print(f"   最大序列长度: {model.max_seq_length}")
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        print(f"   GPU 显存已占用: {allocated:.2f} GB")
+    
+    if USE_API_EMBEDDING:
+        # 使用硅基流动 API
+        print(f"📡 使用 API Embedding 模型: {EMBEDDING_MODEL}")
+        model = APIEmbedder(
+            model_name=EMBEDDING_MODEL,
+            api_key=SILICONFLOW_API_KEY,
+            base_url=SILICONFLOW_BASE_URL
+        )
+        print(f"✅ API 客户端初始化完成")
+        print(f"   向量维度: {model.get_sentence_embedding_dimension()}")
+        print(f"   最大序列长度: {model.max_seq_length}")
+    else:
+        # 使用本地模型（原有代码保留）
+        MODEL_PATH = EMBEDDING_MODEL
+        try:
+            from modelscope import snapshot_download
+            modelscope_id = "BAAI/bge-m3"
+            print(f"📥 正在通过 ModelScope 下载模型: {modelscope_id}...")
+            MODEL_PATH = snapshot_download(modelscope_id, cache_dir="./model_cache")
+            print(f"✅ ModelScope 下载完成，缓存至: {MODEL_PATH}")
+        except ImportError:
+            print("⚠️ 未安装 modelscope，将使用 HuggingFace 源")
+        except Exception as e:
+            print(f"⚠️ ModelScope 下载失败: {e}")
+            print(f"   回退到 HuggingFace 源: {EMBEDDING_MODEL}")
+            MODEL_PATH = EMBEDDING_MODEL
+
+        print(f"\n📦 加载 Embedding 模型: {MODEL_PATH} (fp16)")
+        model = SentenceTransformer(
+            MODEL_PATH,
+            device=device,
+            trust_remote_code=True,
+            model_kwargs={"torch_dtype": torch.float16},
+        )
+        print(f"✅ 模型加载完成，耗时: {time.time() - t0:.2f} 秒")
+        print(f"   向量维度: {model.get_sentence_embedding_dimension()}")
+        print(f"   最大序列长度: {model.max_seq_length}")
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"   GPU 显存已占用: {allocated:.2f} GB")
     
     for chunk_size, json_dir in CHUNK_DIRS.items():
         if not os.path.isdir(json_dir):

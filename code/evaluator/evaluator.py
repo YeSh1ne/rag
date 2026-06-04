@@ -107,11 +107,29 @@ class ContentBasedRAGEvaluator:
             # 不可回答类问题：评判标准是模型是否正确拒答
             # 判断模型是否拒答（使用灵活的关键词匹配）
             refusal_keywords = [
+                # 标准拒答
                 "无法回答", "不可回答", "无法提供", "没有足够信息",
                 "无法确定", "不能回答", "不足以回答", "无法给出",
-                "无法判断", "信息不足", "无法找到"
+                "无法判断", "信息不足", "无法找到",
+                # 扩展拒答表达
+                "没有提到", "未提及", "没有相关", "不存在",
+                "不知道", "不清楚", "无法确认", "无法得知",
+                "缺乏信息", "缺少信息", "没有说明", "未说明",
+                "没有描述", "未描述", "没有涉及", "未涉及",
+                "无法从", "根据已有信息", "基于提供的信息",
+                "文中没有", "文章没有", "上下文中没有"
             ]
             is_correct_refusal = any(kw in predicted_answer for kw in refusal_keywords)
+            
+            # 调试：输出拒答判断详情
+            print(f"  [DEBUG] 不可回答问题评判:")
+            print(f"    模型回答: '{predicted_answer[:150]}{'...' if len(predicted_answer) > 150 else ''}'")
+            print(f"    是否拒答: {is_correct_refusal}")
+            for kw in refusal_keywords:
+                if kw in predicted_answer:
+                    print(f"    ✅ 匹配到关键词: '{kw}'")
+            if not is_correct_refusal:
+                print(f"    ❌ 未匹配任何拒答关键词，判定为强行回答")
             
             # 不可回答类问题：拒答=1分，强行回答=0分
             correctness_score = 1.0 if is_correct_refusal else 0.0

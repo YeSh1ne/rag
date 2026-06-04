@@ -14,6 +14,7 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from openai import OpenAI
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from embedding_utils import APIEmbedder
 
 
 # ========== 模型下载辅助函数 ==========
@@ -37,8 +38,9 @@ def download_from_modelscope(model_name: str, cache_dir: str = "./model_cache") 
 
 
 # ========== 配置 ==========
-EMBEDDING_MODEL = "BAAI/bge-m3"
-RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # 本地: BAAI/bge-m3 | API: Qwen/Qwen3-Embedding-8B
+USE_API_EMBEDDING = True  # True=使用硅基流动API, False=使用本地模型
+RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"  # 重排序模型（对比实验保持不变）
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 # 向量数据库路径：与 build_vector_db.py 保持一致
@@ -68,17 +70,27 @@ class RAGModels:
         self._llm_client = None
 
     @property
-    def embedder(self) -> SentenceTransformer:
+    def embedder(self):
         if self._embedder is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            # 尝试从 ModelScope 下载
-            model_path = download_from_modelscope(EMBEDDING_MODEL)
-            print(f"📦 加载 Embedding 模型: {model_path}")
-            self._embedder = SentenceTransformer(
-                model_path,
-                device=device,
-                model_kwargs={"torch_dtype": torch.float16} if device == "cuda" else {},
-            )
+            if USE_API_EMBEDDING:
+                # 使用硅基流动 API（新增）
+                print(f"📡 使用 API Embedding 模型: {EMBEDDING_MODEL}")
+                self._embedder = APIEmbedder(
+                    model_name=EMBEDDING_MODEL,
+                    api_key=SILICONFLOW_API_KEY,
+                    base_url=SILICONFLOW_BASE_URL
+                )
+            else:
+                # 使用本地模型（原有代码保留）
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                # 尝试从 ModelScope 下载
+                model_path = download_from_modelscope(EMBEDDING_MODEL)
+                print(f"📦 加载 Embedding 模型: {model_path}")
+                self._embedder = SentenceTransformer(
+                    model_path,
+                    device=device,
+                    model_kwargs={"torch_dtype": torch.float16} if device == "cuda" else {},
+                )
         return self._embedder
 
     @property
