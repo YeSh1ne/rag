@@ -7,18 +7,28 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="header">
-        <h1>📚 论文 RAG 问答系统</h1>
-        <p>基于学术论文的智能问答助手</p>
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h3>💬 对话历史</h3>
+            <button class="toggle-sidebar-btn" onclick="toggleSidebar()">◀</button>
+        </div>
+        <div class="history-list" id="historyList"></div>
     </div>
 
-    <div class="chat-wrapper">
-        <div class="chat-container" id="chatContainer"></div>
-        <div class="status" id="status"></div>
-        <div class="input-container">
-            <div class="input-wrapper">
-                <input type="text" id="questionInput" placeholder="请输入您的问题..." autocomplete="off">
-                <button id="sendBtn">发送</button>
+    <div class="main-content">
+        <div class="header">
+            <h1>📚 论文 RAG 问答系统</h1>
+            <p>基于学术论文的智能问答助手</p>
+        </div>
+
+        <div class="chat-wrapper">
+            <div class="chat-container" id="chatContainer"></div>
+            <div class="status" id="status"></div>
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <input type="text" id="questionInput" placeholder="请输入您的问题..." autocomplete="off">
+                    <button id="sendBtn">发送</button>
+                </div>
             </div>
         </div>
     </div>

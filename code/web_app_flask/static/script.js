@@ -2,6 +2,11 @@ const chatContainer = document.getElementById('chatContainer');
 const questionInput = document.getElementById('questionInput');
 const sendBtn = document.getElementById('sendBtn');
 const status = document.getElementById('status');
+const historyList = document.getElementById('historyList');
+
+// 历史记录存储 - 内存存储，重启后清空
+let messages = [];
+let sidebarCollapsed = false;
 
 sendBtn.addEventListener('click', sendMessage);
 
@@ -11,6 +16,59 @@ questionInput.addEventListener('keypress', (e) => {
     }
 });
 
+// 初始化
+if (sidebarCollapsed) {
+    document.getElementById('sidebar').classList.add('collapsed');
+}
+renderHistoryList();
+
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    sidebar.classList.toggle('collapsed');
+    sidebarCollapsed = sidebar.classList.contains('collapsed');
+    
+    const btn = sidebar.querySelector('.toggle-sidebar-btn');
+    btn.textContent = sidebarCollapsed ? '▶' : '◀';
+}
+
+function renderHistoryList() {
+    historyList.innerHTML = '';
+    
+    // 按提问顺序从上到下排列
+    messages.forEach((msg, index) => {
+        if (msg.role === 'user') {
+            const item = document.createElement('div');
+            item.className = 'history-item';
+            item.onclick = () => scrollToMessage(index);
+            
+            const question = document.createElement('div');
+            question.className = 'question';
+            question.textContent = msg.content;
+            
+            const time = document.createElement('div');
+            time.className = 'time';
+            time.textContent = formatTime(msg.timestamp);
+            
+            item.appendChild(question);
+            item.appendChild(time);
+            historyList.appendChild(item);
+        }
+    });
+}
+
+function scrollToMessage(index) {
+    const msgEl = document.getElementById(`msg-${index}`);
+    if (msgEl) {
+        msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // 高亮效果
+        msgEl.style.transition = 'background 0.3s';
+        msgEl.style.background = 'rgba(0, 101, 255, 0.1)';
+        setTimeout(() => {
+            msgEl.style.background = '';
+        }, 1500);
+    }
+}
+
 async function sendMessage() {
     const question = questionInput.value.trim();
     if (!question) return;
@@ -18,13 +76,26 @@ async function sendMessage() {
     questionInput.disabled = true;
     sendBtn.disabled = true;
 
+    // 保存用户消息到数组
+    const userMsgIndex = messages.length;
+    messages.push({
+        role: 'user',
+        content: question,
+        timestamp: new Date().toISOString()
+    });
+    
     addUserMessage(question);
     questionInput.value = '';
 
     // 立即创建助手消息占位符
-    const assistantMsg = createAssistantMessage();
+    const assistantMsg = createAssistantMessage(userMsgIndex);
     status.className = 'status loading';
     status.textContent = '🔍 正在处理...';
+
+    const conversation = {
+        answer: '',
+        steps: []
+    };
 
     try {
         const response = await fetch('/api/ask', {
@@ -52,8 +123,9 @@ async function sendMessage() {
                         const data = JSON.parse(line.slice(6));
                         
                         if (data.type === 'start') {
-                            // 服务器已接收请求，立即显示处理中状态
                             assistantMsg.stepsContainer.style.display = 'block';
+                            assistantMsg.stepsHeader.classList.remove('collapsed');
+                            assistantMsg.stepsBody.classList.remove('hidden');
                         } else if (data.type === 'step') {
                             const existingIndex = steps.findIndex(s => s.label === data.label);
                             if (existingIndex >= 0) {
@@ -61,12 +133,24 @@ async function sendMessage() {
                             } else {
                                 steps.push(data);
                             }
-                            updateSteps(assistantMsg, steps);
+                            conversation.steps = [...steps];
+                            updateSteps(assistantMsg, steps, false);
                         } else if (data.type === 'answer') {
+                            conversation.answer = data.content;
                             updateAnswer(assistantMsg, data.content);
                         } else if (data.type === 'done') {
+                            updateSteps(assistantMsg, steps, true);
                             status.textContent = '';
                             status.className = 'status';
+                            // 保存助手消息到数组
+                            messages.push({
+                                role: 'assistant',
+                                ...conversation,
+                                timestamp: new Date().toISOString()
+                            });
+                            localStorage.removeItem('chatMessages');
+                            localStorage.removeItem('sidebarCollapsed');
+                            renderHistoryList();
                         } else if (data.type === 'error') {
                             throw new Error(data.message);
                         }
@@ -90,9 +174,10 @@ async function sendMessage() {
     }
 }
 
-function addUserMessage(content) {
+function addUserMessage(content, scroll = true) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message user';
+    messageDiv.id = `msg-${messages.length - 1}`;
 
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
@@ -100,12 +185,33 @@ function addUserMessage(content) {
 
     messageDiv.appendChild(bubble);
     chatContainer.appendChild(messageDiv);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+    
+    if (scroll) {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
 }
 
-function createAssistantMessage() {
+function formatTime(isoString) {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diff = now - date;
+    
+    if (diff < 60000) return '刚刚';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+    
+    return date.toLocaleDateString('zh-CN', { 
+        month: 'short', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+function createAssistantMessage(userMsgIndex) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message assistant';
+    messageDiv.id = `msg-${userMsgIndex + 1}`;
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
@@ -149,7 +255,7 @@ function createAssistantMessage() {
     return { messageDiv, stepsContainer, stepsHeader, stepsBody, answerDiv };
 }
 
-function updateSteps(msg, steps) {
+function updateSteps(msg, steps, isDone = false) {
     msg.stepsContainer.style.display = 'block';
     msg.stepsBody.innerHTML = '';
 
@@ -165,13 +271,18 @@ function updateSteps(msg, steps) {
         msg.stepsBody.appendChild(stepItem);
     });
 
-    // 更新状态文本
+    // 更新状态文本和展开/收起状态
     const statusSpan = msg.stepsHeader.querySelector('.steps-status');
-    const allDone = steps.every(s => s.time);
-    if (allDone) {
-        statusSpan.textContent = '✅ 回答生成完成';
+    if (isDone) {
+        statusSpan.textContent = '📋 处理详情';
+        // 处理完成后收起
+        msg.stepsHeader.classList.add('collapsed');
+        msg.stepsBody.classList.add('hidden');
     } else {
         statusSpan.textContent = '⏳ 正在处理...';
+        // 处理中保持展开
+        msg.stepsHeader.classList.remove('collapsed');
+        msg.stepsBody.classList.remove('hidden');
     }
 
     chatContainer.scrollTop = chatContainer.scrollHeight;
