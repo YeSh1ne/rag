@@ -27,10 +27,10 @@ from embedding_utils import APIEmbedder
 CHUNK_DIRS = {
     "256": r"E:\rag_project\code\parsed_output_256",
     "512": r"E:\rag_project\code\parsed_output_512",
-    #"1024": r"E:\rag_project\code\parsed_output_1024",
+    "1024": r"E:\rag_project\code\parsed_output_1024",
 }
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # 本地: BAAI/bge-m3 | API: Qwen/Qwen3-Embedding-8B
-USE_API_EMBEDDING = True  # True=使用硅基流动API, False=使用本地模型
+USE_API_EMBEDDING = True # True=使用硅基流动API, False=使用本地模型
 SILICONFLOW_API_KEY = "sk-sikigylnjewmvxoilaeihressilakdjxgmckrsqavluinily"  # 替换为您的硅基流动API Key
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 MODEL_SHORT_NAME = EMBEDDING_MODEL.split("/")[-1].lower().replace("_", "-")

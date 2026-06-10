@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>论文 RAG 问答系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="header">
+        <h1>📚 论文 RAG 问答系统</h1>
+        <p>基于学术论文的智能问答助手</p>
+    </div>
+
+    <div class="chat-wrapper">
+        <div class="chat-container" id="chatContainer"></div>
+        <div class="status" id="status"></div>
+        <div class="input-container">
+            <div class="input-wrapper">
+                <input type="text" id="questionInput" placeholder="请输入您的问题..." autocomplete="off">
+                <button id="sendBtn">发送</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

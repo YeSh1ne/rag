@@ -18,10 +18,14 @@ from embedding_utils import APIEmbedder
 
 
 # ========== 模型下载辅助函数 ==========
-def download_from_modelscope(model_name: str, cache_dir: str = "./model_cache") -> str:
+def download_from_modelscope(model_name: str, cache_dir: str = None) -> str:
     """
     从 ModelScope 下载模型，如果失败则返回原始模型名
     """
+    # 使用绝对路径，避免从不同目录启动时重复下载
+    if cache_dir is None:
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_cache")
+    
     try:
         from modelscope import snapshot_download
         print(f"📥 正在通过 ModelScope 下载模型: {model_name}...")
@@ -38,24 +42,24 @@ def download_from_modelscope(model_name: str, cache_dir: str = "./model_cache") 
 
 
 # ========== 配置 ==========
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # 本地: BAAI/bge-m3 | API: Qwen/Qwen3-Embedding-8B
-USE_API_EMBEDDING = True  # True=使用硅基流动API, False=使用本地模型
+EMBEDDING_MODEL = "BAAI/bge-m3"  # 本地: BAAI/bge-m3 | API: Qwen/Qwen3-Embedding-8B
+USE_API_EMBEDDING = False  # True=使用硅基流动API, False=使用本地模型
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"  # 重排序模型（对比实验保持不变）
 BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 # 向量数据库路径：与 build_vector_db.py 保持一致
 MODEL_SHORT_NAME = EMBEDDING_MODEL.split("/")[-1].lower().replace("_", "-")
-CHUNK_SIZE = "256"  # 与 build_vector_db.py 中使用的 chunk_size 一致
+CHUNK_SIZE = "512"  # 与 build_vector_db.py 中使用的 chunk_size 一致
 VECTOR_DB_DIR = rf"E:\rag_project\code\vector_db\{MODEL_SHORT_NAME}\chunk_{CHUNK_SIZE}"
 COLLECTION_NAME = f"rag_papers_{CHUNK_SIZE}"
 
 RETRIEVE_TOP_K = 20
-RERANK_TOP_K = 10
+RERANK_TOP_K = 5
 MMR_LAMBDA = 0.55  # MMR多样性权重, 1.0=纯相关性, 0.0=纯多样性 (0.5=平衡)
 
-LLM_MODEL = "deepseek-ai/DeepSeek-V4-Pro"  # 生成回答用的模型
+LLM_MODEL = "deepseek-ai/DeepSeek-V4-Flash"  # 生成回答用的模型
 SCORING_MODEL = "Qwen/Qwen2.5-32B-Instruct"  # 评分用的模型（14B，评判能力更强）
-SILICONFLOW_API_KEY = "sk-sikigylnjewmvxoilaeihressilakdjxgmckrsqavluinily"  # 替换为您的硅基流动API Key
+SILICONFLOW_API_KEY = "sk-budorxggodzqkjiedqprgkhffzuggepgrmwcakelpgexfqrb"  # 替换为您的硅基流动API Key
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 LLM_MAX_NEW_TOKENS = 1024
 LLM_TEMPERATURE = 0.3
@@ -155,6 +159,14 @@ class RAGModels:
             timeout=120,  # 120秒超时（生成回答需要更长时间）
         )
         return response.choices[0].message.content.strip()
+    
+    def preload(self):
+        """预加载所有模型到 GPU，避免首次查询时延迟"""
+        print("🔄 预加载 Embedding 模型...")
+        _ = self.embedder
+        print("🔄 预加载 Reranker 模型...")
+        _ = self.reranker
+        print("✅ 所有模型预加载完成！")
 
 # ========== 2. 向量检索 ==========
 def retrieve(query: str, chroma_collection, embedder: SentenceTransformer, top_k: int = RETRIEVE_TOP_K) -> list[dict]:
@@ -316,18 +328,20 @@ def build_prompt(query: str, context_docs: list[dict]) -> list[dict]:
     system_prompt = (
         "你是一个学术论文问答助手。请严格基于提供的论文片段回答用户问题。\n\n"
         "【输出格式】\n"
-        "1. 先输出回答正文（准确、简洁的中文）\n"
-        "2. 换行后输出引用，格式：来自: [论文名, 第X页, chunk_id]\n\n"
+        "1. 先输出回答正文（准确、简洁的中文），后输出引用\n\n"
+        "2. 每个引用必须单独一行，格式：来自: [论文名, 第X页, chunk_id]\n\n"
         "【示例】\n"
         "该模型通过引入安全对齐机制提升了鲁棒性。\n"
-        "来自: [2025.acl-long.230_SafeRAG, 第2页, 2025.acl-long.230_SafeRAG_chunk_004]\n\n"
+        "来自: [SafeRAG: Benchmarking Security in Retrieval-Augmented Generation of Large Language Model, 第2页, SafeRAG: Benchmarking Security in Retrieval-Augmented Generation of Large Language Model_chunk_004]\n\n"
         "【引用原则】\n"
         "- 宁缺毋滥：只引用直接支持回答内容的chunk\n"
+        "- 每个引用必须单独一行，不能多个引用连在一起\n"
         "- 每个引用必须与回答中的具体陈述对应\n"
         "- 1个准确引用 > 3个模糊引用\n"
         "- 论文名、页码、chunk_id必须与上下文完全一致\n\n"
         "【跨论文比较要求】\n"
         "- 如果问题要求比较不同论文的方法/结果，请分别引用各论文对应的chunk\n"
+        "- 生成完所有回答正文再生成对应的引用,不要生成部分回答又生成相应引用又继续生成回答, 注意生成完正文后要换行再生成引用\n"
         "- 每个比较点必须明确指出来自哪篇论文\n"
         "- 不要编造论文之间没有的关联\n"
         "【注意】\n"

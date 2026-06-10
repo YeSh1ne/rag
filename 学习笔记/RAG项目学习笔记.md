@@ -1,6 +1,6 @@
 RAG问答系统架构
 
-![RAG问答系统架构](../attachment/2026/05/RAG问答系统架构.png)
+![](../attachment/2026/06/image.png)
 
 所以分为两步工作， 
 
