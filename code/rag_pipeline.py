@@ -57,7 +57,7 @@ RETRIEVE_TOP_K = 20
 RERANK_TOP_K = 5
 MMR_LAMBDA = 0.55  # MMR多样性权重, 1.0=纯相关性, 0.0=纯多样性 (0.5=平衡)
 
-LLM_MODEL = "deepseek-ai/DeepSeek-V4-Flash"  # 生成回答用的模型
+LLM_MODEL = "deepseek-ai/DeepSeek-V4-Pro"  # 生成回答用的模型
 SCORING_MODEL = "Qwen/Qwen2.5-32B-Instruct"  # 评分用的模型（14B，评判能力更强）
 SILICONFLOW_API_KEY = "sk-budorxggodzqkjiedqprgkhffzuggepgrmwcakelpgexfqrb"  # 替换为您的硅基流动API Key
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"

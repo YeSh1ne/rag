@@ -15,6 +15,38 @@ app = Flask(__name__)
 
 models = None
 collection = None
+paper_title_to_filename = {}  # 原论文名 -> PDF 文件名映射
+
+def init_paper_mapping():
+    """从 parsed JSON 文件建立 title -> filename 映射"""
+    global paper_title_to_filename
+    import glob
+    
+    json_dir = r"E:\rag_project\code\parsed_output_1024"
+    pdf_dir = r"E:\rag_project\code\web_app_flask\static\papers"
+    
+    # 获取所有 PDF 文件名
+    pdf_files = set()
+    for f in os.listdir(pdf_dir):
+        if f.endswith('.pdf'):
+            pdf_files.add(f)
+    
+    # 读取 JSON 文件建立映射
+    for json_file in glob.glob(os.path.join(json_dir, "*.json")):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            title = data.get('title', '')
+            if title:
+                # 从 JSON 文件名提取 PDF 前缀（如 2025.acl-long.230_SafeRAG）
+                json_basename = os.path.splitext(os.path.basename(json_file))[0]
+                pdf_filename = json_basename + '.pdf'
+                if pdf_filename in pdf_files:
+                    paper_title_to_filename[title] = pdf_filename
+        except:
+            pass
+    
+    print(f"✅ 论文映射加载完成: {len(paper_title_to_filename)} 篇")
 
 def init_models():
     global models, collection
@@ -33,6 +65,11 @@ def init_models():
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/pdf-viewer')
+def pdf_viewer():
+    """PDF 查看器页面，支持页码跳转和文本高亮"""
+    return render_template('pdf-viewer.html')
 
 @app.route('/api/ask', methods=['POST'])
 def ask():
@@ -75,17 +112,48 @@ def ask():
             yield f"data: {json.dumps({'type': 'step', 'icon': '💬', 'label': '正在生成回答', 'detail': '生成完成', 'time': f'{t1:.2f}秒'})}\n\n"
             
             # 后处理引用
-            citation_pattern = r'来自[：:]\s*\[[^\]]+\]'
+            citation_pattern = r'来自[：:]\s*\[([^\]]+)\]'
             citations = re.findall(citation_pattern, answer)
-            clean_answer = re.sub(r'\s*' + citation_pattern, '', answer)
+            clean_answer = re.sub(r'\s*来自[：:]\s*\[[^\]]+\]', '', answer)
             clean_answer = re.sub(r'\n{2,}', '\n\n', clean_answer).strip()
             
+            # 构建 sources 信息
+            sources = []
             if citations:
                 clean_answer += '\n\n---\n\n**参考来源：**\n\n'
                 for citation in citations:
-                    clean_answer += f'- {citation}\n'
+                    # 解析引用："KiRAG: Knowledge-Driven..., 第4页, ..."
+                    parts = [p.strip() for p in citation.split(',')]
+                    paper_title = parts[0] if parts else ''
+                    page_info = parts[1] if len(parts) > 1 else ''
+                    
+                    # 通过映射查找对应的 PDF 文件名
+                    pdf_filename = paper_title_to_filename.get(paper_title, '')
+                    
+                    # 提取页码数字
+                    page_num = ''
+                    page_match = re.search(r'第(\d+)页', page_info)
+                    if page_match:
+                        page_num = page_match.group(1)
+                    
+                    # 构建 PDF 直链（浏览器原生查看器）
+                    if pdf_filename:
+                        pdf_url = f'/static/papers/{pdf_filename}'
+                        if page_num:
+                            pdf_url += f'#page={page_num}'
+                    else:
+                        pdf_url = ''
+                    
+                    sources.append({
+                        'paper_title': paper_title,
+                        'page': page_info,
+                        'pdf_url': pdf_url,
+                        'full_citation': citation
+                    })
+                    
+                    clean_answer += f'- 来自: [{citation}]\n'
             
-            yield f"data: {json.dumps({'type': 'answer', 'content': clean_answer})}\n\n"
+            yield f"data: {json.dumps({'type': 'answer', 'content': clean_answer, 'sources': sources})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             
         except Exception as e:
@@ -95,4 +163,5 @@ def ask():
 
 if __name__ == '__main__':
     init_models()
+    init_paper_mapping()
     app.run(host='0.0.0.0', port=5000, debug=False)

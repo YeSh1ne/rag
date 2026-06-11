@@ -137,7 +137,7 @@ async function sendMessage() {
                             updateSteps(assistantMsg, steps, false);
                         } else if (data.type === 'answer') {
                             conversation.answer = data.content;
-                            updateAnswer(assistantMsg, data.content);
+                            updateAnswer(assistantMsg, data.content, data.sources || []);
                         } else if (data.type === 'done') {
                             updateSteps(assistantMsg, steps, true);
                             status.textContent = '';
@@ -288,8 +288,29 @@ function updateSteps(msg, steps, isDone = false) {
     chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
-function updateAnswer(msg, content) {
+function updateAnswer(msg, content, sources = []) {
     msg.answerDiv.innerHTML = renderMarkdown(content);
+    
+    // 处理引用链接
+    if (sources && sources.length > 0) {
+        const html = msg.answerDiv.innerHTML;
+        
+        // 将引用文本替换为可点击链接
+        let newHtml = html;
+        sources.forEach(source => {
+            const citationText = source.full_citation;
+            if (source.pdf_url) {
+                const linkHtml = `来自: <a href="${source.pdf_url}" target="_blank" class="citation-link">[${citationText}]</a>`;
+                newHtml = newHtml.replace(
+                    `来自: [${citationText}]`,
+                    linkHtml
+                );
+            }
+        });
+        
+        msg.answerDiv.innerHTML = newHtml;
+    }
+    
     chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
