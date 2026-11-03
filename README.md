@@ -6,6 +6,81 @@
 
 本项目以 40 篇大模型与引文评估相关学术论文为数据源，搭建轻量化本地 RAG 问答框架。可接收自然语言中文问题，从论文知识库中匹配相关文本片段，结合大模型生成作答内容，同时输出**论文名称、页码、chunk\_id**三级引用来源，满足文献查阅、论文研读、问题溯源等使用场景。
 
+## 项目结构
+
+```
+code/
+├── parsePaper.py            # 阶段1+2：PDF解析为Markdown + 按Token分片
+├── build_vector_db.py       # 阶段3：Embedding编码 + ChromaDB向量存储
+├── rag_pipeline.py          # 核心Pipeline：检索→重排序→Prompt构建→LLM生成
+├── embedding_utils.py       # APIEmbedder适配器：封装硅基流动API，兼容SentenceTransformer接口
+├── run_evaluation.py        # 评测运行脚本：串联RAG Pipeline与评测器
+├── evaluator/               # 评测模块
+│   ├── evaluator.py         # 评测器主类：基于内容匹配的RAG评测
+│   ├── metrics.py           # 评测指标：Recall@K、MRR、引用准确率
+│   ├── scorer.py            # LLM评分：RAGas风格知识点拆解(TP/FP/FN) + Claim验证
+│   ├── utils.py             # 评测工具：语义相似度计算、Gold Evidence解析、Markdown清洗
+│   └── excel_handler.py     # Excel输出：逐题追加结果 + 平均值公式行
+├── web_app_flask/           # Flask Web应用
+│   ├── app.py               # Flask后端：路由、SSE流式推送、PDF引用映射
+│   ├── templates/
+│   │   └── index.html       # 前端页面模板
+│   └── static/
+│       ├── script.js        # 前端交互逻辑（SSE接收、对话管理）
+│       ├── style.css        # 页面样式
+│       └── papers/          # 论文PDF文件（供在线预览和页码跳转）
+├── parsed_markdown_raw/     # 阶段1输出：PDF解析后的原始Markdown（JSON格式）
+├── parsed_output_256/       # 阶段2输出：chunk_size=256的分片结果
+├── parsed_output_512/       # 阶段2输出：chunk_size=512的分片结果
+├── parsed_output_1024/      # 阶段2输出：chunk_size=1024的分片结果
+├── vector_db/               # 阶段3输出：ChromaDB向量数据库
+│   ├── bge-m3/              # BGE-M3 Embedding 的向量库
+│   └── qwen3-embedding-8b/  # Qwen3-Embedding-8B 的向量库
+├── experiment/              # 对比实验结果（Excel文件）
+└── readme.md                # 本文件
+```
+
+## 快速启动
+
+### 环境要求
+
+- Python 3.10+
+- GPU（推荐，用于模型推理）或 CPU（速度较慢）
+- 硅基流动 API Key（用于 LLM 生成和可选的 API Embedding）
+
+### 安装依赖
+
+```bash
+pip install flask chromadb sentence-transformers torch openai tiktoken modelscope
+pip install marker-pdf  # PDF解析
+pip install pandas openpyxl  # 评测相关
+```
+
+### 启动 Web 问答界面
+
+```bash
+cd e:\rag_project\code
+python web_app_flask/app.py
+```
+
+启动后在浏览器访问 **http://localhost:5000** 即可使用。
+
+> 首次启动会自动加载 Embedding 模型、Reranker 模型和向量数据库，需要等待约 1-2 分钟。
+
+### 命令行交互模式
+
+```bash
+cd e:\rag_project\code
+python rag_pipeline.py
+```
+
+### 运行评测
+
+```bash
+cd e:\rag_project\code
+python run_evaluation.py
+```
+
 ## 技术选型
 
 | 阶段         | 组件          | 技术选型                                 |
